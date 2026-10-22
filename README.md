@@ -17,7 +17,43 @@ A self-hosted, multi-store employee scheduling and time tracking system with a f
 - SQLite database kept on a persistent Unraid appdata folder; immutable audit records of changes; separate archive action for time entries and shifts.
 - Works on mobile and desktop browsers; no external JavaScript or fonts.
 
-## Install on Unraid
+## Native Unraid Docker installation — normal Update button
+
+The recommended long-term deployment uses the published image `ghcr.io/apatel1927/schedule-creator:latest` and the included `templates/my-shiftledger.xml`. Once installed through **Unraid Docker → Add Container**, updates use **Docker → Check for Updates → Update**. Unraid owns the container settings; future updates no longer require downloading source ZIPs or running Compose rebuilds.
+
+GitHub Actions builds this image on the repository's `main` branch **only after all backend and UI smoke tests pass**. The package must be accessible to Unraid. GitHub Container Registry initially makes new packages private. The GitHub package owner must either make the image public (a visibility decision that cannot easily be reversed) or configure Docker registry authentication on Unraid. Public is the simpler option for native Unraid updates; this installer does not change GitHub package visibility automatically.
+
+### Convert an existing Compose-based ShiftLedger (one time)
+
+From your Unraid Terminal, download the latest installer files:
+
+```sh
+mkdir -p /mnt/user/appdata/shiftledger-native-installer
+cd /mnt/user/appdata/shiftledger-native-installer
+curl -fL -o ShiftLedger.zip https://github.com/apatel1927/Schedule-Creator/archive/refs/heads/main.zip
+unzip -o -q ShiftLedger.zip
+cd Schedule-Creator-main
+sh MIGRATE-UNRAID-NATIVE.sh
+```
+
+The script first checks the GHCR image can be pulled and verifies that the existing container uses exactly `/mnt/user/appdata/shiftledger/data` for its database. It takes a verified live backup, saves Docker configuration diagnostics in its own `RESULTS` directory and installs the Unraid template. After **one confirmation**, it stops and renames the old Compose container, leaving it recoverable. It does **not** erase appdata, credentials, the old image or the old container.
+
+Then, in Unraid WebGUI:
+
+1. **Docker → Add Container**, select user template **shiftledger**.
+2. Keep repository `ghcr.io/apatel1927/schedule-creator:latest`, port **8787** and Appdata **`/mnt/user/appdata/shiftledger/data`**. Leave **Initial owner password** blank when migrating an existing database—your real password is already in the database and will be preserved.
+3. Click **Apply**, wait for the image to start, then open `http://YOUR-UNRAID-IP:8787`. Confirm your stores, employees, logins, schedules and hours still appear.
+4. In Compose Manager, disable automatic startup of the **old** ShiftLedger stack if it was enabled. Do not start the renamed legacy container while the new container uses the same database.
+
+If native installation fails, run `sh ROLLBACK-UNRAID-NATIVE.sh` from the same installer folder. This parks the new native container and restores the previous Compose container without deleting data. The original appdata and backup remain available.
+
+Only after verifying the new installation should you consider removing the old parked container. Future code updates arrive via the usual **Update** action on the Unraid Docker tab, when a new `latest` image is published.
+
+### Fresh native installation
+
+If you have no existing ShiftLedger database, obtain `templates/my-shiftledger.xml` and put it in `/boot/config/plugins/dockerMan/templates-user/`, then use **Docker → Add Container → shiftledger**. Enter a strong unique 12+ character **Initial owner password**, keep Appdata set to `/mnt/user/appdata/shiftledger/data`, and click Apply. This initial password is only used to create the first owner account. Save it safely.
+
+## Legacy local-build install on Unraid
 
 1. Download the project ZIP or clone the repository onto Unraid (or transfer the extracted folder to the server).
 2. Open the Unraid **Terminal**, `cd` into the folder containing `INSTALL-UNRAID.sh`, and run:
@@ -33,9 +69,9 @@ A self-hosted, multi-store employee scheduling and time tracking system with a f
 
 The app creates and uses `/mnt/user/appdata/shiftledger/data` for durable database storage. Restarting or updating the container does not erase employee records, shifts or hours. The installation script preserves an existing `.env` and never wipes your appdata.
 
-Prerequisite: Docker Compose availability on Unraid (e.g. Compose Manager / Docker Compose plugin). `INSTALL-UNRAID.sh` checks this before deployment. No container image is published to a registry; Unraid builds the included Dockerfile locally on first install.
+Prerequisite: Docker Compose availability on Unraid (e.g. Compose Manager / Docker Compose plugin). `INSTALL-UNRAID.sh` checks this before deployment. This legacy installer builds the included Dockerfile locally rather than pulling the published GHCR image.
 
-**Why is there no Update button in Unraid's Docker tab?** This installation is a *locally built Docker Compose stack*, not a container installed through Unraid's native Docker template from a public image registry. The Docker tab therefore cannot pull future ShiftLedger releases as regular image updates. Use the tested `UPGRADE-UNRAID.sh` flow below for now. A native Docker-tab update workflow will require publishing a versioned image to a registry and migrating the existing container to an Unraid-managed Docker template while retaining its appdata.
+**Why did the Docker tab not show Update?** Old installations are locally built Compose stacks, which Unraid does not manage as native Docker templates. Run the one-time native migration above to switch to regular Docker tab updates. The legacy `UPGRADE-UNRAID.sh` method remains available if the registry is unavailable.
 
 **Manual alternative:** copy `.env.example` to `.env`, replace its admin password with a long unique one, and run `docker compose up --build -d` in this directory. The password is only used to create the first owner login on an empty database; changing `.env` later will not reset an existing password.
 

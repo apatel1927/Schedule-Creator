@@ -9,6 +9,7 @@ import hmac
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -84,6 +85,7 @@ def init_db():
             open_time TEXT NOT NULL DEFAULT '09:00', close_time TEXT NOT NULL DEFAULT '17:00',
             slot_minutes INTEGER NOT NULL DEFAULT 480, break_minutes INTEGER NOT NULL DEFAULT 30,
             staffing_json TEXT NOT NULL DEFAULT '[1,1,1,1,1,1,1]',
+            shift_templates_json TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS employees (
@@ -143,11 +145,14 @@ def init_db():
             ("slot_minutes", "INTEGER NOT NULL DEFAULT 480"),
             ("break_minutes", "INTEGER NOT NULL DEFAULT 30"),
             ("staffing_json", "TEXT NOT NULL DEFAULT '[1,1,1,1,1,1,1]'"),
+            ("shift_templates_json", "TEXT"),
         ):
             if column not in store_columns:
                 con.execute(f"ALTER TABLE stores ADD COLUMN {column} {ddl}")
         if "generated" not in [row[1] for row in con.execute("PRAGMA table_info(shifts)")]:
             con.execute("ALTER TABLE shifts ADD COLUMN generated INTEGER NOT NULL DEFAULT 0")
+        if "template_key" not in [row[1] for row in con.execute("PRAGMA table_info(shifts)")]:
+            con.execute("ALTER TABLE shifts ADD COLUMN template_key TEXT")
         existing = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if not existing:
             username = os.environ.get("ADMIN_USERNAME", "admin").strip()
@@ -293,7 +298,15 @@ def validate_employee_shift(con, employee_id, day, start, end, skip_id=None):
     date_base = as_date(day).toordinal()*1440
     a1 = date_base+as_time(start)
     a2 = date_base+as_time(end)+(1440 if as_time(end) <= as_time(start) else 0)
-    for shift in previous:
+    # Include the following day even when the new shift starts on Sunday: a
+    # Sunday overnight shift can overlap a Monday shift in the next week.
+    overlaps = rows(con, """SELECT id,shift_date,start_time,end_time FROM shifts
+                   WHERE employee_id=? AND deleted_at IS NULL AND shift_date BETWEEN ? AND ?""",
+                    (employee_id, (as_date(day)-timedelta(days=1)).isoformat(),
+                     (as_date(day)+timedelta(days=1)).isoformat()))
+    for shift in overlaps:
+        if shift["id"] == skip_id:
+            continue
         prior_base = as_date(shift["shift_date"]).toordinal()*1440
         b1 = prior_base+as_time(shift["start_time"])
         b2 = prior_base+as_time(shift["end_time"])+(1440 if as_time(shift["end_time"]) <= as_time(shift["start_time"]) else 0)
@@ -407,17 +420,95 @@ def staffing_settings(body):
     opening = require_string(body.get("open_time", ""), "Opening time", 5)
     closing = require_string(body.get("close_time", ""), "Closing time", 5)
     open_min, close_min = as_time(opening), as_time(closing)
-    if close_min <= open_min:
-        raise InputError("Closing time must be later than opening time (overnight templates are not supported yet)")
+    if close_min == open_min:
+        raise InputError("Store opening and closing times cannot be the same")
+    span = (close_min - open_min) % 1440
     duration = integer_range(body.get("slot_minutes"), "Shift length", 30, 1380)
     pause = integer_range(body.get("break_minutes"), "Unpaid break", 0, 600)
-    if duration > close_min - open_min or pause >= duration:
+    if duration > span or pause >= duration:
         raise InputError("Shift length must fit store hours and exceed the unpaid break")
     staffing = body.get("staffing")
     if not isinstance(staffing, list) or len(staffing) != 7:
         raise InputError("Set staffing counts for all seven weekdays")
     staffing = [integer_range(count, "Daily staffing count", 0, 20) for count in staffing]
-    return opening, closing, duration, pause, json.dumps(staffing)
+    templates = body.get("templates")
+    if templates is not None:
+        templates = validate_shift_templates(templates, opening, closing)
+        staffing = [sum(block["staffing"][d] for block in templates) for d in range(7)]
+    return opening, closing, duration, pause, json.dumps(staffing), (json.dumps(templates) if templates is not None else None)
+
+
+def anchored_shift_range(opening, start, end):
+    """Shift times on the store's operating day; after-midnight is day + 1."""
+    opening_minute = as_time(opening)
+    first = as_time(start)
+    last = as_time(end)
+    first += 1440 if first < opening_minute else 0
+    last += 1440 if last < opening_minute or last <= as_time(start) else 0
+    return first, last
+
+
+def validate_shift_templates(value, opening, closing):
+    if not isinstance(value, list) or not 1 <= len(value) <= 12:
+        raise InputError("Add between 1 and 12 shift types")
+    close_abs = as_time(opening) + (as_time(closing)-as_time(opening)) % 1440
+    normalized, seen = [], set()
+    for block in value:
+        if not isinstance(block, dict):
+            raise InputError("Invalid shift type")
+        key = require_string(block.get("id", ""), "Shift type ID", 40)
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", key) or key in seen:
+            raise InputError("Every shift type needs a unique ID")
+        seen.add(key)
+        name = require_string(block.get("name", ""), "Shift name", 60)
+        st = require_string(block.get("start_time", ""), "Shift start", 5)
+        en = require_string(block.get("end_time", ""), "Shift end", 5)
+        pause = integer_range(block.get("break_minutes", 0), "Unpaid break", 0, 600)
+        shift_minutes(st, en, pause)
+        a, b = anchored_shift_range(opening, st, en)
+        if a < as_time(opening) or b > close_abs or b <= a:
+            raise InputError(f"{name} must fit within store hours ({opening}–{closing}, closing may be next day)")
+        counts = block.get("staffing")
+        if not isinstance(counts, list) or len(counts) != 7:
+            raise InputError(f"Set all seven daily staffing counts for {name}")
+        counts = [integer_range(c, f"{name} employee count", 0, 20) for c in counts]
+        normalized.append({"id": key, "name": name, "start_time": st, "end_time": en,
+                           "break_minutes": pause, "staffing": counts})
+    if any(sum(block["staffing"][d] for block in normalized) > 100 for d in range(7)):
+        raise InputError("Maximum 100 total shift assignments per day")
+    return normalized
+
+
+def coverage_count(store, shifts, day_index):
+    """Count assigned shifts against named shift types, preserving manager edits."""
+    templates = json.loads(store.get("shift_templates_json") or "null")
+    if not templates:
+        return min(len(shifts), json.loads(store["staffing_json"])[day_index])
+    capacity = {block["id"]: block["staffing"][day_index] for block in templates}
+    covered = {block["id"]: 0 for block in templates}
+    pending = []
+    for sh in shifts:
+        key = sh.get("template_key")
+        if key in covered:
+            covered[key] += 1
+        else:
+            pending.append(sh)
+    # Older/manual shifts have no template ID. Match to the block with most
+    # clock-time overlap (not merely any shift on the same calendar date).
+    for sh in pending:
+        a, b = anchored_shift_range(store["open_time"], sh["start_time"], sh["end_time"])
+        matches = []
+        for block in templates:
+            if covered[block["id"]] >= capacity[block["id"]]:
+                continue
+            x, y = anchored_shift_range(store["open_time"], block["start_time"], block["end_time"])
+            overlap = max(0, min(b, y)-max(a, x))
+            if overlap:
+                matches.append((overlap, block["id"]))
+        if matches:
+            _, key = max(matches)
+            covered[key] += 1
+    return sum(min(covered[key], capacity[key]) for key in capacity)
 
 
 def schedule_estimate(user, week_start, store_filter=None):
@@ -434,7 +525,7 @@ def schedule_estimate(user, week_start, store_filter=None):
             FROM shifts sh JOIN employees e ON e.id=sh.employee_id
             LEFT JOIN employee_stores es ON es.employee_id=sh.employee_id AND es.store_id=sh.store_id
             WHERE sh.deleted_at IS NULL AND sh.shift_date BETWEEN ? AND ?""", (start, last))
-        stores = rows(con, "SELECT id,staffing_json FROM stores WHERE active=1")
+        stores = rows(con, "SELECT id,staffing_json,shift_templates_json,open_time FROM stores WHERE active=1")
     if allowed is not None:
         shifts = [s for s in shifts if s["store_id"] in allowed]
         stores = [s for s in stores if s["id"] in allowed]
@@ -445,9 +536,15 @@ def schedule_estimate(user, week_start, store_filter=None):
     wages = sum(money_round(Decimal(shift_minutes(s["start_time"], s["end_time"], s["break_minutes"]))
                             * Decimal(s["hourly_rate_cents"]) / Decimal(60)) for s in shifts)
     desired = sum(sum(json.loads(s["staffing_json"])) for s in stores)
+    filled = 0
+    for store in stores:
+        for day_idx in range(7):
+            day = (monday_date + timedelta(days=day_idx)).isoformat()
+            day_shifts = [sh for sh in shifts if sh["store_id"] == store["id"] and sh["shift_date"] == day]
+            filled += coverage_count(store, day_shifts, day_idx)
     return {"week_start": start, "week_end": last, "store_id": store_filter,
             "shift_count": len(shifts), "planned_minutes": minutes, "estimated_base_cents": wages,
-            "staffing_target": desired, "unfilled_slots": max(0, desired-len(shifts)),
+            "staffing_target": desired, "unfilled_slots": max(0, desired-filled),
             "draft_count": sum(s["status"] == "draft" for s in shifts)}
 
 
@@ -464,7 +561,7 @@ def generate_week(user, store_id, week_start):
             employees = rows(con, """SELECT e.id,e.name,e.max_days,e.availability_json FROM employees e JOIN employee_stores es
                                      ON es.employee_id=e.id WHERE es.store_id=? AND e.active=1
                                      ORDER BY e.id""", (store_id,))
-            existing = rows(con, """SELECT employee_id,store_id,shift_date,start_time,end_time,break_minutes
+            existing = rows(con, """SELECT employee_id,store_id,shift_date,start_time,end_time,break_minutes,template_key
                                     FROM shifts WHERE deleted_at IS NULL AND shift_date BETWEEN ? AND ?""",
                             (start.isoformat(), week_end))
             total_mins = {}
@@ -476,8 +573,9 @@ def generate_week(user, store_id, week_start):
                 day_people.setdefault(sh["shift_date"], set()).add(emp)
                 if sh["store_id"] == store_id:
                     day_store_count[sh["shift_date"]] = day_store_count.get(sh["shift_date"], 0) + 1
+            templates = json.loads(store["shift_templates_json"] or "null")
             open_min, close_min = as_time(store["open_time"]), as_time(store["close_time"])
-            span = close_min - open_min
+            span = (close_min - open_min) % 1440
             duration = min(store["slot_minutes"], span)
             pause = store["break_minutes"]
             if span <= 0 or duration <= pause:
@@ -486,6 +584,56 @@ def generate_week(user, store_id, week_start):
             created, unfilled = [], []
             for weekday in range(7):
                 day = (start + timedelta(days=weekday)).isoformat()
+                if templates:
+                    store_shifts = [sh for sh in existing if sh["store_id"] == store_id and sh["shift_date"] == day]
+                    # Account for manually assigned people and already-generated
+                    # shifts separately in each day/evening coverage block.
+                    counted = {block["id"]: 0 for block in templates}
+                    for sh in store_shifts:
+                        if sh.get("template_key") in counted:
+                            counted[sh["template_key"]] += 1
+                    for sh in store_shifts:
+                        if sh.get("template_key") in counted:
+                            continue
+                        a, b = anchored_shift_range(store["open_time"], sh["start_time"], sh["end_time"])
+                        matches = []
+                        for block in templates:
+                            if counted[block["id"]] >= block["staffing"][weekday]:
+                                continue
+                            x, y = anchored_shift_range(store["open_time"], block["start_time"], block["end_time"])
+                            overlap = max(0, min(b, y) - max(a, x))
+                            if overlap:
+                                matches.append((overlap, block["id"]))
+                        if matches:
+                            counted[max(matches)[1]] += 1
+                    busy = day_people.setdefault(day, set())
+                    for block in templates:
+                        missing = max(0, block["staffing"][weekday] - counted[block["id"]])
+                        block_mins = shift_minutes(block["start_time"], block["end_time"], block["break_minutes"])
+                        for slot in range(missing):
+                            eligible = []
+                            for candidate in employees:
+                                if candidate["id"] in busy or total_mins.get(candidate["id"], 0) + block_mins > 2400:
+                                    continue
+                                try:
+                                    validate_employee_shift(con, candidate["id"], day, block["start_time"], block["end_time"])
+                                except InputError:
+                                    continue
+                                eligible.append(candidate)
+                            if not eligible:
+                                unfilled.append({"date": day, "shift": block["name"], "remaining": missing - slot})
+                                break
+                            emp = min(eligible, key=lambda item: (total_mins.get(item["id"], 0), item["id"]))
+                            rid = con.execute("""INSERT INTO shifts(employee_id,store_id,shift_date,start_time,end_time,
+                                break_minutes,notes,status,generated,template_key,created_at)
+                                VALUES(?,?,?,?,?,?,?,'draft',1,?,?)""",
+                                (emp["id"], store_id, day, block["start_time"], block["end_time"],
+                                 block["break_minutes"], "Auto-generated: " + block["name"] + "; review before publishing",
+                                 block["id"], utc_now())).lastrowid
+                            total_mins[emp["id"]] = total_mins.get(emp["id"], 0) + block_mins
+                            busy.add(emp["id"])
+                            created.append(rid)
+                    continue
                 needed = max(0, needs[weekday] - day_store_count.get(day, 0))
                 busy = day_people.setdefault(day, set())
                 for slot in range(needed):
@@ -493,9 +641,9 @@ def generate_week(user, store_id, week_start):
                     offset = 0 if needs[weekday] <= 1 else round((span-duration) *
                                      (day_store_count.get(day, 0) + slot) / max(1, needs[weekday]-1))
                     start_min = open_min + offset
-                    start_time = f"{start_min//60:02d}:{start_min%60:02d}"
+                    start_time = f"{(start_min//60)%24:02d}:{start_min%60:02d}"
                     end_min = start_min + duration
-                    end_time = f"{end_min//60:02d}:{end_min%60:02d}"
+                    end_time = f"{(end_min//60)%24:02d}:{end_min%60:02d}"
                     eligible = []
                     for candidate in employees:
                         if candidate["id"] in busy or total_mins.get(candidate["id"], 0) + paid_mins > 2400:
@@ -578,7 +726,7 @@ def calculate_payroll(start, end, store_filter=None):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "StaffWeek-ShiftLedger/1.2"
+    server_version = "StaffWeek-ShiftLedger/1.3"
 
     def log_message(self, fmt, *args):
         print("[%s] %s %s" % (utc_now(), self.client_address[0], fmt % args), flush=True)
@@ -657,7 +805,7 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         try:
             if path == "/api/health" and method == "GET":
-                return self.json(200, {"ok": True, "version": "1.2.0"})
+                return self.json(200, {"ok": True, "version": "1.3.0"})
             if method != "GET" and not self.same_origin():
                 return self.json(403, {"error": "Cross-origin request rejected"})
             if path == "/api/login" and method == "POST":
@@ -713,13 +861,13 @@ class Handler(BaseHTTPRequestHandler):
                 body = self.read_json()
                 store = positive_id(body.get("store_id"), "store")
                 authorize_store(user, store)
-                opening, closing, duration, pause, staffing = staffing_settings(body)
+                opening, closing, duration, pause, staffing, templates = staffing_settings(body)
                 with db() as con:
                     with con:
                         ensure_record(con, "stores", store, True)
                         con.execute("""UPDATE stores SET open_time=?,close_time=?,slot_minutes=?,
-                                      break_minutes=?,staffing_json=? WHERE id=?""",
-                                    (opening, closing, duration, pause, staffing, store))
+                                      break_minutes=?,staffing_json=?,shift_templates_json=? WHERE id=?""",
+                                    (opening, closing, duration, pause, staffing, templates, store))
                         audit(con, user["username"], "set_staffing", "store", store, body)
                 return self.json(200, {"ok": True})
             if path == "/api/payroll" and method == "GET":

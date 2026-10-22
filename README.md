@@ -51,7 +51,7 @@ Only after verifying the new installation should you consider removing the old p
 
 ### Fresh native installation
 
-If you have no existing ShiftLedger database, obtain `templates/my-shiftledger.xml` and put it in `/boot/config/plugins/dockerMan/templates-user/`, then use **Docker → Add Container → shiftledger**. Enter a strong unique 12+ character **Initial owner password**, keep Appdata set to `/mnt/user/appdata/shiftledger/data`, and click Apply. This initial password is only used to create the first owner account. Save it safely.
+If you have no existing ShiftLedger database, obtain `templates/my-shiftledger.xml` and put it in `/boot/config/plugins/dockerMan/templates-user/`, then use **Docker → Add Container → shiftledger**. Enter an **Initial owner password**, keep Appdata set to `/mnt/user/appdata/shiftledger/data`, and click Apply. This initial password is only used to create the first owner account. Save it safely.
 
 ## Legacy local-build install on Unraid
 
@@ -116,7 +116,7 @@ If the existing container is not running, do not run a live upgrade without a ve
 
 ## Security & limitations
 
-- First boot requires an admin password of 12+ characters; sessions use HttpOnly SameSite cookies and request protection tokens.
+- First boot requires an admin password; sessions use HttpOnly SameSite cookies and request protection tokens.
 - **LAN only by default.** Do **not** forward port 8787 to the internet. For access outside the store, use a trusted VPN or an authenticated reverse proxy with HTTPS. If serving behind HTTPS, set `COOKIE_SECURE=true` in compose after configuring TLS.
 - Managers' store access is checked on the server. They can modify pay rates **only for employees at their assigned stores**. Historic rates are snapshot in actual time records.
 - Pay is an **estimate**, not payroll processing: no withholding, employer taxes, benefit deductions, tip/bonus adjustments, wage-law jurisdiction logic, exemptions, differential premiums or direct deposits. The default overtime preview assumes 40 hours per Monday–Sunday week, totals all locations, and uses weighted-average regular rates. Confirm the correct employee classification, workweek boundary and overtime calculations with your payroll service before payment.

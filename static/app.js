@@ -130,13 +130,13 @@ function renderWeekTable() {
       return (daily.length?daily:[null]).map((shift,index)=>`<tr><td><strong>${index===0?day:''}</strong><small>${index===0?shortDate(date):''}</small></td><td>${shift?esc(getEmployee(shift.employee_id)?.name||'Unknown employee'):'<span class="muted">No shifts</span>'}</td><td>${shift?shiftLabel(shift):'—'}</td><td>${shift?hours(shiftMins(shift)):'—'}</td><td>${shift?badge(shift.status,shift.status==='draft'?'draft':''):'—'}</td><td class="actions no-print">${shift?`<button class="text-btn" data-action="edit-shift" data-id="${shift.id}">Edit</button> ${index===daily.length-1?`<button class="text-btn" data-action="new-shift" data-date="${date}" data-store="${store.id}">＋ Add another</button>`:''}`:`<button class="text-btn" data-action="new-shift" data-date="${date}" data-store="${store.id}">＋ Add shift</button>`}</td></tr>`).join('');
     }).join('');
     return `<section class="card staffweek-table"><div class="staffweek-table-header"><h3>${esc(store.name)}</h3><span>${shifts.length} shifts · ${hours(shifts.reduce((sum,s)=>sum+shiftMins(s),0))} paid hours</span></div><div class="table-card"><table class="data-table"><thead><tr><th>Day / date</th><th>Employee</th><th>Shift</th><th>Hours</th><th>Status</th><th class="no-print">Change</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
-  }).join('')||empty('No stores available',isOwner()?'Create a store to start planning the weekly schedule.':'Ask the owner to assign you a store.',isOwner()?'new-store':'','Add store');
+  }).join('')||empty('No stores available','Create a store to start planning the weekly schedule.','new-store','Add store');
 }
 function renderSchedule() {
   const range=getRange();const count=visibleShifts().filter(s=>s.shift_date>=localDay(range.first)&&s.shift_date<=localDay(range.last)).length;
   const estimate=state.estimate, week=localDay(monday(state.cursor));
   const help=state.store==='all'?'Select one store above to auto-generate shifts for that location.':'Generate draft shifts from your store staffing setup, then click any shift to change the assigned employee or hours.';
-  const setupActions=allStores().length?`<button class="btn" data-action="staffing">⚙ Staffing setup</button><button class="btn primary" data-action="generate-week">✦ Generate week</button>`:(isOwner()?'<button class="btn primary" data-view="stores">＋ Create a store</button>':'');
+  const setupActions=allStores().length?`<button class="btn" data-action="staffing">⚙ Staffing setup</button><button class="btn primary" data-action="generate-week">✦ Generate week</button>`:'<button class="btn primary" data-view="stores">＋ Create a store</button>';
   return heading('STAFFWEEK SCHEDULER','Schedule','A dated weekly schedule for each store. Auto-generate a week, then make any changes you need.',`<button class="btn secondary no-print" data-action="print-schedule">Print / Save PDF</button><button class="btn no-print" data-action="bulk">↻ Repeating shifts</button><button class="btn no-print" data-action="new-shift">＋ Add shift</button>`)+
   `<div class="filter-strip"><span class="filter-label">SCHEDULE STORE</span>${commonStoreSelector()}<span class="tab-note">${esc(help)}</span><div class="spacer"></div>${setupActions}</div>
   <div class="stats-grid">${statistic('Week of',shortDate(week),'Monday–Sunday','▦')}${statistic('Scheduled shifts',estimate?.shift_count??'—',`${estimate?.draft_count??0} drafts this week`,'♙')}${statistic('Scheduled hours',estimate?hours(estimate.planned_minutes):'—','Planned paid hours, less unpaid breaks','◷','blue')}${statistic('Estimated weekly wages',estimate?money(estimate.estimated_base_cents):'—','Straight-time wages only; excludes overtime, taxes & extras','＄','purple')}</div>
@@ -147,9 +147,9 @@ function renderSchedule() {
 }
 function renderEmployees() {
   const employees=state.data.employees.filter(e=>state.store==='all'||state.data.employee_stores.some(es=>es.employee_id===e.id&&es.store_id===Number(state.store)));
-  const addBtn=isOwner()?'<button class="btn primary" data-action="new-employee">＋ Add employee</button>':'';
+  const addBtn='<button class="btn primary" data-action="new-employee">＋ Add employee</button>';
   return heading('THE PEOPLE BEHIND THE WORK','Employees','Manage your team, store assignments and hourly pay rates.',`${commonStoreSelector()}${addBtn}`)+
-  `<div class="card table-card">${employees.length?`<table class="data-table"><thead><tr><th>Employee</th><th>Assigned stores</th><th>Hourly rate by store</th><th>Max days / week</th><th>Status</th><th></th></tr></thead><tbody>${employees.map(e=>{const assoc=state.data.employee_stores.filter(x=>x.employee_id===e.id);return `<tr><td><div class="table-person">${avatar(e)}<div><strong>${esc(e.name)}</strong><small>${esc(e.role||'Team member')}</small></div></div></td><td>${esc(assoc.map(x=>getStore(x.store_id)?.name).filter(Boolean).join(' · '))}</td><td>${assoc.map(x=>`<div style="margin:3px 0;white-space:nowrap"><strong class="currency">${money(x.rate_cents??e.rate_cents)}/hr</strong><span class="inline-detail"> · ${esc(getStore(x.store_id)?.name||'')}</span> <button class="text-btn" data-action="edit-rate" data-employee="${e.id}" data-store="${x.store_id}">Edit rate</button></div>`).join('')}</td><td>${Number(e.max_days||5)}</td><td>${badge(e.active?'Active':'Inactive',e.active?'':'gray')}</td><td class="actions">${isOwner()?`<button class="text-btn" data-action="edit-employee" data-id="${e.id}">Edit →</button>`:''}</td></tr>`}).join('')}</tbody></table>`:empty('No employees yet','Add team members, then assign them to one or more stores.',isOwner()?'new-employee':'', 'Add employee')}</div>`;
+  `<div class="card table-card">${employees.length?`<table class="data-table"><thead><tr><th>Employee</th><th>Assigned stores</th><th>Hourly rate by store</th><th>Max days / week</th><th>Status</th><th></th></tr></thead><tbody>${employees.map(e=>{const assoc=state.data.employee_stores.filter(x=>x.employee_id===e.id);return `<tr><td><div class="table-person">${avatar(e)}<div><strong>${esc(e.name)}</strong><small>${esc(e.role||'Team member')}</small></div></div></td><td>${esc(assoc.map(x=>getStore(x.store_id)?.name).filter(Boolean).join(' · '))}</td><td>${assoc.map(x=>`<div style="margin:3px 0;white-space:nowrap"><strong class="currency">${money(x.rate_cents??e.rate_cents)}/hr</strong><span class="inline-detail"> · ${esc(getStore(x.store_id)?.name||'')}</span> <button class="text-btn" data-action="edit-rate" data-employee="${e.id}" data-store="${x.store_id}">Edit rate</button></div>`).join('')}</td><td>${Number(e.max_days||5)}</td><td>${badge(e.active?'Active':'Inactive',e.active?'':'gray')}</td><td class="actions"><button class="text-btn" data-action="edit-employee" data-id="${e.id}">Edit →</button></td></tr>`}).join('')}</tbody></table>`:empty('No employees yet','Add team members, then assign them to one or more stores.','new-employee', 'Add employee')}</div>`;
 }
 function availableDays(employee) {
   try {const days=JSON.parse(employee.availability_json);return Array.isArray(days)&&days.length===7?days:[1,1,1,1,1,1,1];}
@@ -160,7 +160,7 @@ function renderAvailability() {
   const days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
   return heading('STAFFWEEK AVAILABILITY','Weekly availability','Select the weekdays each employee can work. Auto-scheduling and manual shifts respect these settings.',commonStoreSelector())+
     `<div class="staffweek-hint">Availability is shared across all stores assigned to an employee. The maximum number of workdays per week is configured under Employees.</div>
-    ${people.length?people.map(e=>`<section class="card availability-panel"><div class="availability-heading">${avatar(e)}<div><h3>${esc(e.name)}</h3><p>${esc(e.role||'Team member')} · Up to ${Number(e.max_days||5)} days per week</p></div></div><div class="availability-week">${days.map((day,i)=>`<label><input name="available_day" type="checkbox" data-employee="${e.id}" data-weekday="${i}" ${availableDays(e)[i]?'checked':''}><span>${day}</span></label>`).join('')}</div></section>`).join(''):empty('No employees assigned','Create an employee and assign them to this store to set availability.',isOwner()?'new-employee':'','Add employee')}`;
+    ${people.length?people.map(e=>`<section class="card availability-panel"><div class="availability-heading">${avatar(e)}<div><h3>${esc(e.name)}</h3><p>${esc(e.role||'Team member')} · Up to ${Number(e.max_days||5)} days per week</p></div></div><div class="availability-week">${days.map((day,i)=>`<label><input name="available_day" type="checkbox" data-employee="${e.id}" data-weekday="${i}" ${availableDays(e)[i]?'checked':''}><span>${day}</span></label>`).join('')}</div></section>`).join(''):empty('No employees assigned','Create an employee and assign them to this store to set availability.','new-employee','Add employee')}`;
 }
 function renderTime() {
   const entries=visibleEntries().slice().sort((a,b)=>b.entry_date.localeCompare(a.entry_date)||b.id-a.id);
@@ -181,17 +181,17 @@ function renderPayroll() {
 }
 function renderStores() {
   const cards=allStores().map(s=>{const people=state.data.employee_stores.filter(e=>e.store_id===s.id).length;
-    return `<div class="card store-card"><div class="store-head"><div class="store-mark" style="background:${esc(s.color)}">⌂</div>${badge(s.active?'Active':'Inactive',s.active?'':'gray')}</div><h3>${esc(s.name)}</h3><p>${esc(s.location||'No location details added')}</p><div class="store-meta"><span>${people} assigned employee${people===1?'':'s'}</span>${isOwner()?`<button class="text-btn" data-action="edit-store" data-id="${s.id}">Edit store →</button>`:''}<button class="text-btn" data-action="staffing" data-store="${s.id}">Staffing setup →</button></div></div>`}).join('');
-  return heading('ONE HOME FOR EVERY LOCATION','Your stores','Set up locations and assign each team its weekly staffing plan.',isOwner()?'<button class="btn primary" data-action="new-store">＋ Add store</button>':'')+
-    (isOwner()?'<div class="manager-permissions">Signed in as <strong>Owner</strong>. You can create stores here, then create manager logins under <strong>Managers & access</strong> and assign each manager to one or more stores.</div>':'<div class="manager-permissions">You are signed in as a <strong>Manager</strong>. Only the owner can add stores and login accounts. You can edit the staffing setup for stores assigned to you.</div>')+
-    `<div class="store-grid">${cards||empty('No stores available',isOwner()?'Create your first store.':'Ask the owner to assign you a store.',isOwner()?'new-store':'','Add store')}</div>`;
+    return `<div class="card store-card"><div class="store-head"><div class="store-mark" style="background:${esc(s.color)}">⌂</div>${badge(s.active?'Active':'Inactive',s.active?'':'gray')}</div><h3>${esc(s.name)}</h3><p>${esc(s.location||'No location details added')}</p><div class="store-meta"><span>${people} assigned employee${people===1?'':'s'}</span><button class="text-btn" data-action="edit-store" data-id="${s.id}">Edit store →</button><button class="text-btn" data-action="staffing" data-store="${s.id}">Staffing setup →</button></div></div>`}).join('');
+  return heading('ONE HOME FOR EVERY LOCATION','Your stores','Set up locations and assign each team its weekly staffing plan.','<button class="btn primary" data-action="new-store">＋ Add store</button>')+
+    (isOwner()?'<div class="manager-permissions">Signed in as <strong>Owner</strong>. You can create stores here, then create manager logins under <strong>Managers & access</strong> and assign each manager to one or more stores.</div>':'<div class="manager-permissions">You are signed in as a <strong>Manager</strong>. You can add stores (you get access automatically), add and edit employees, and edit staffing for your stores. Only the owner manages login accounts and payroll.</div>')+
+    `<div class="store-grid">${cards||empty('No stores available','Create your first store.','new-store','Add store')}</div>`;
 }
 function renderManagers() {
   if(!isOwner()) return '';
   const users=state.accounts?.users?.filter(u=>u.role==='manager')||[];
   const links=state.accounts?.user_stores||[];
   return heading('GIVE THE RIGHT ACCESS','Managers & access','Create logins and decide which locations each manager can schedule.',`<button class="btn primary" data-action="new-manager">＋ Add manager</button>`)+
-   `<div class="manager-permissions"><strong>Owner:</strong> all stores, employees, wages, payroll and manager accounts.<br><strong>Manager:</strong> schedules, actual hours and hourly pay rates for assigned stores. Payroll reports and manager-account administration stay owner-only.</div>
+   `<div class="manager-permissions"><strong>Owner:</strong> all stores, employees, wages, payroll and manager accounts.<br><strong>Manager:</strong> can add stores and employees, and manage schedules, hours and pay rates for their stores. Payroll reports and manager-account administration stay owner-only.</div>
    <div class="card table-card">${users.length?`<table class="data-table"><thead><tr><th>Manager account</th><th>Store access</th><th>Status</th><th></th></tr></thead><tbody>${users.map(u=>`<tr><td><div class="table-person"><div class="avatar a3">${esc(u.username[0].toUpperCase())}</div><div><strong>${esc(u.username)}</strong><small>Manager login</small></div></div></td><td>${esc(links.filter(x=>x.user_id===u.id).map(x=>getStore(x.store_id)?.name).filter(Boolean).join(' · '))}</td><td>${badge(u.active?'Active':'Disabled',u.active?'':'gray')}</td><td class="actions"><button class="text-btn" data-action="edit-manager" data-id="${u.id}">Edit →</button></td></tr>`).join('')}</tbody></table>`:empty('No managers added','Create a manager login to delegate schedules and time entry.','new-manager','Add manager')}</div>
    <div style="margin-top:18px"><button class="btn" data-action="change-password">⚿ Change my password</button></div>`;
 }
@@ -222,17 +222,15 @@ function statusChoice(value='draft'){return selectField('status','Schedule statu
 function ensureStaffFor(store) {
   if(state.data.employee_stores.some(x=>x.store_id===Number(store)&&getEmployee(x.employee_id)?.active))return true;
   state.view='employees';render();
-  toast(isOwner()?'Add an employee assigned to this store first. The employee form is opening.':'No employees are assigned to this store. Ask the owner to add staff.',true);
-  if(isOwner())showEmployee();
+  toast('Add an employee assigned to this store first. The employee form is opening.',true);
+  showEmployee();
   return false;
 }
 function ensureActiveStore() {
   if(allStores().some(x=>x.active))return true;
   state.view='stores';render();
-  if(isOwner()){
-    toast('Create a store first; the store form is opening.',true);
-    showStore();
-  }else toast('No active store is assigned to this login. Ask the owner to add or assign one.',true);
+  toast('Create a store first; the store form is opening.',true);
+  showStore();
   return false;
 }
 function showShift(s,preferredDate='',preferredStore) {
@@ -252,7 +250,6 @@ function showBulk() {
 }
 function storeChecks(ids) {return `<div class="check-row">${allStores().filter(s=>s.active||ids.includes(s.id)).map(s=>`<label><input type="checkbox" name="store_ids" value="${s.id}" ${ids.includes(s.id)?'checked':''}>${esc(s.name)}</label>`).join('')}</div>`;}
 function showEmployee(e) {
-  if(!isOwner())return;
   if(!allStores().some(s=>s.active)){
     state.view='stores';render();toast('Create an active store before adding employees',true);showStore();return;
   }
@@ -265,7 +262,6 @@ function showRate(employeeId,storeId) {
   openModal('Edit hourly pay rate',`<form id="rate-form"><input name="employee_id" type="hidden" value="${employeeId}"><input name="store_id" type="hidden" value="${storeId}"><div class="manager-permissions"><strong>${esc(employee.name)}</strong><br>${esc(store.name)} · This rate is used for future time entries at this store.</div>${input('rate','Hourly pay rate ($)',((assoc.rate_cents??employee.rate_cents)/100).toFixed(2),'number','min="0" step="0.01" required')}<p class="helper">Changing the rate does not rewrite previously recorded work or past payroll estimates.</p>${footer('Update pay rate')}</form>`);
 }
 function showStore(s) {
-  if(!isOwner())return;
   const colors=['#3c8d82','#397bb2','#b57747','#745fc5','#c05f76','#337f66'];
   openModal(s?'Edit store':'Add store',`<form id="store-form"><input type="hidden" name="id" value="${s?.id||''}">${input('name','Store name',s?.name||'','text','required maxlength="100" placeholder="Downtown Store"')}${input('location','Address / location (optional)',s?.location||'','text','maxlength="200" placeholder="City, state or address"')}<label>Store color</label><div class="check-row">${colors.map(c=>`<label style="border-color:${c}50"><input name="color" type="radio" value="${c}" ${(s?.color||'#3c8d82')===c?'checked':''}><span style="background:${c};width:14px;height:14px;border-radius:50%;display:inline-block"></span></label>`).join('')}</div>${s?`<div class="form-checkbox"><input id="active-store" name="active" type="checkbox" ${s.active?'checked':''}><label for="active-store">Active store</label></div>`:''}${footer(s?'Save store':'Create store')}</form>`);
 }
@@ -303,10 +299,10 @@ function showManager(u) {
   if(!isOwner())return;
   const ids=u?state.accounts.user_stores.filter(x=>x.user_id===u.id).map(x=>x.store_id):[allStores().find(s=>s.active)?.id].filter(Boolean);
   if(!ensureActiveStore())return;
-  openModal(u?'Edit manager':'Create manager login',`<form id="manager-form"><input type="hidden" name="id" value="${u?.id||''}">${input('username','Login username',u?.username||'','text','required autocomplete="username" maxlength="80" pattern="[a-zA-Z0-9_\\-]+" title="Letters, numbers, hyphens and underscores only"')}${input('password',u?'New password (leave blank to keep current)':'Initial password (at least 12 characters)','', 'password',`${u?'':'required'} minlength="12" autocomplete="new-password"`)}<label>Stores this manager can access (select at least one)</label>${storeChecks(ids)}${u?`<div class="form-checkbox"><input type="checkbox" id="manager-active" name="active" ${u.active?'checked':''}><label for="manager-active">Account enabled</label></div>`:''}<p class="tab-note">Give the manager this username and password to sign in on the normal login page. Managers can edit schedules, actual hours and hourly rates for assigned stores; owner-only reports and account administration remain restricted.</p>${footer(u?'Save manager':'Create login')}</form>`);
+  openModal(u?'Edit manager':'Create manager login',`<form id="manager-form"><input type="hidden" name="id" value="${u?.id||''}">${input('username','Login username',u?.username||'','text','required autocomplete="username" maxlength="80" pattern="[a-zA-Z0-9_\\-]+" title="Letters, numbers, hyphens and underscores only"')}${input('password',u?'New password (leave blank to keep current)':'Initial password','', 'password',`${u?'':'required'} autocomplete="new-password"`)}<label>Stores this manager can access (select at least one)</label>${storeChecks(ids)}${u?`<div class="form-checkbox"><input type="checkbox" id="manager-active" name="active" ${u.active?'checked':''}><label for="manager-active">Account enabled</label></div>`:''}<p class="tab-note">Give the manager this username and password to sign in on the normal login page. Managers can add stores and employees and manage schedules, hours and rates for their stores; payroll and login accounts stay owner-only.</p>${footer(u?'Save manager':'Create login')}</form>`);
 }
 function showChangePassword() {
-  openModal('Change my password',`<form id="password-form">${input('current_password','Current password','','password','required autocomplete="current-password"')}${input('new_password','New password (at least 12 characters)','','password','required minlength="12" autocomplete="new-password"')}${footer('Change password')}</form>`);
+  openModal('Change my password',`<form id="password-form">${input('current_password','Current password','','password','required autocomplete="current-password"')}${input('new_password','New password','','password','required autocomplete="new-password"')}${footer('Change password')}</form>`);
 }
 
 async function refresh() {

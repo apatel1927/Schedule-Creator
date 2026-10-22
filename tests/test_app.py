@@ -109,9 +109,7 @@ class ShiftLedgerTests(unittest.TestCase):
         token=self.login(manager,'manager1','manager-password-1234')['csrf']
         data=self.request(manager,'/api/data')
         self.assertEqual([s['id'] for s in data['stores']],[1])
-        self.assertNotIn('rate_cents',data['employees'][0])
         self.request(manager,'/api/payroll?start=2026-11-02&end=2026-11-08',expect=403)
-        self.request(manager,'/api/stores',{'name':'Not allowed'},token,expect=403)
         self.request(manager,'/api/store-rate',{'employee_id':emp,'store_id':store2,'rate':'25.00'},token,expect=400)
         self.request(manager,'/api/store-rate',{'employee_id':emp,'store_id':1,'rate':'25.00'},token)
         data=self.request(manager,'/api/data')
@@ -160,10 +158,31 @@ class ShiftLedgerTests(unittest.TestCase):
         manager=self.client()
         csrf=self.login(manager,'north_manager','very-secure-password-001')['csrf']
         self.assertEqual([s['id'] for s in self.request(manager,'/api/data')['stores']],[store])
-        # Store and login creation must remain restricted to the owner.
-        self.request(manager,'/api/users',{'username':'unauthorized','password':'very-secure-password-222',
+        # Login creation stays owner-only.
+        self.request(manager,'/api/users',{'username':'unauthorized','password':'x',
                      'store_ids':[store]},csrf,expect=403)
-        self.request(manager,'/api/stores',{'name':'Unauthorized Store'},csrf,expect=403)
+        # Managers can create stores and are automatically given access to them.
+        new_store=self.request(manager,'/api/stores',{'name':'Manager Store'},csrf)['id']
+        self.assertEqual(sorted(s['id'] for s in self.request(manager,'/api/data')['stores']),sorted([store,new_store]))
+        self.request(manager,'/api/stores',{'id':new_store,'name':'Renamed','active':True},csrf)
+        # ...but cannot edit a store they were not assigned.
+        self.request(manager,'/api/stores',{'id':1,'name':'Hijack','active':True},csrf,expect=400)
+        # Managers can create and edit employees at their stores only.
+        emp=self.request(manager,'/api/employees',{'name':'New Hire','rate':'15.00','store_ids':[new_store]},csrf)['id']
+        self.request(manager,'/api/employees',{'id':emp,'name':'New Hire','rate':'16.00','store_ids':[new_store],'active':True},csrf)
+        self.request(manager,'/api/employees',{'name':'Elsewhere','rate':'15.00','store_ids':[1]},csrf,expect=400)
+        # Editing a shared employee must not drop assignments or reprice stores the manager cannot see.
+        shared=self.create_employee([1,store],rate='20.00')
+        self.request(manager,'/api/employees',{'id':shared,'name':'Test Cashier','rate':'25.00','store_ids':[store],'active':True},csrf)
+        links={x['store_id']:x['rate_cents'] for x in self.request(self.owner,'/api/data')['employee_stores'] if x['employee_id']==shared}
+        self.assertEqual(links,{1:2000,store:2500})
+        outsider=self.create_employee([1])
+        self.request(manager,'/api/employees',{'id':outsider,'name':'X','rate':'1','store_ids':[store],'active':True},csrf,expect=403)
+
+    def test_short_passwords_are_allowed(self):
+        self.request(self.owner,'/api/users',{'username':'short','password':'1234','store_ids':[1]},self.csrf)
+        self.login(self.client(),'short','1234')
+        self.request(self.owner,'/api/users',{'username':'empty','password':'','store_ids':[1]},self.csrf,expect=400)
 
     def test_week_generation_is_draft_editable_idempotent_and_estimated(self):
         store=1

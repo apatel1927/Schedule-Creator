@@ -157,8 +157,8 @@ def init_db():
         if not existing:
             username = os.environ.get("ADMIN_USERNAME", "admin").strip()
             password = os.environ.get("ADMIN_PASSWORD", "")
-            if not username or len(password) < 12 or password.lower() in ("change-me", "password1234", "changeme1234"):
-                raise RuntimeError("Set ADMIN_USERNAME and a unique ADMIN_PASSWORD (at least 12 characters) before first start")
+            if not username or not password:
+                raise RuntimeError("Set ADMIN_USERNAME and ADMIN_PASSWORD before first start")
             con.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
                         (username, hash_password(password), utc_now()))
             con.execute("INSERT INTO stores(name,location,color,created_at) VALUES(?,?,?,?)",
@@ -377,7 +377,7 @@ def list_data(user):
         if not allowed:
             return {"stores": [], "employees": [], "employee_stores": [], "shifts": [], "entries": []}
         placeholders = ",".join("?" for _ in allowed)
-        employees = rows(con, f"""SELECT DISTINCT e.id,e.name,e.role,e.max_days,e.availability_json,e.active,e.created_at FROM employees e
+        employees = rows(con, f"""SELECT DISTINCT e.id,e.name,e.role,e.rate_cents,e.max_days,e.availability_json,e.active,e.created_at FROM employees e
                          JOIN employee_stores es ON es.employee_id=e.id WHERE es.store_id IN ({placeholders})
                          ORDER BY e.active DESC,e.name""", allowed)
         return {
@@ -898,7 +898,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_bytes(200, out.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8",
                                        headers={"Content-Disposition": f'attachment; filename="shiftledger-pay-{report["start"]}-{report["end"]}.csv"'})
             if path == "/api/stores" and method == "POST":
-                owner_required(user)
                 body = self.read_json()
                 name = require_string(body.get("name", ""), "Store name", 100)
                 location = require_string(body.get("location", ""), "Location", 200, True)
@@ -909,6 +908,7 @@ class Handler(BaseHTTPRequestHandler):
                     with con:
                         if body.get("id"):
                             rid = positive_id(body["id"], "store")
+                            authorize_store(user, rid)
                             ensure_record(con, "stores", rid)
                             active = boolean(body.get("active", True))
                             con.execute("UPDATE stores SET name=?,location=?,color=?,active=? WHERE id=?", (name, location, color, active, rid))
@@ -916,10 +916,12 @@ class Handler(BaseHTTPRequestHandler):
                         else:
                             rid = con.execute("INSERT INTO stores(name,location,color,created_at) VALUES(?,?,?,?)",
                                               (name, location, color, utc_now())).lastrowid
+                            if user["role"] != "owner":
+                                # A manager automatically gets access to stores they create.
+                                con.execute("INSERT INTO user_stores(user_id,store_id) VALUES(?,?)", (user["id"], rid))
                             audit(con, user["username"], "create", "store", rid, body)
                 return self.json(200, {"id": rid})
             if path == "/api/employees" and method == "POST":
-                owner_required(user)
                 body = self.read_json()
                 name = require_string(body.get("name", ""), "Employee name", 120)
                 role = require_string(body.get("role", ""), "Role", 100, True)
@@ -929,6 +931,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(store_ids, list) or not store_ids or len(store_ids) > 100:
                     raise InputError("Select at least one store")
                 store_ids = sorted(set(positive_id(s, "store") for s in store_ids))
+                manager = user["role"] != "owner"
+                for s in store_ids:
+                    authorize_store(user, s)
                 with db() as con:
                     with con:
                         for s in store_ids:
@@ -936,6 +941,13 @@ class Handler(BaseHTTPRequestHandler):
                         if body.get("id"):
                             rid = positive_id(body["id"], "employee")
                             old_employee = ensure_record(con, "employees", rid)
+                            if not can_manage_employee(con, user, rid):
+                                raise PermissionError("You do not manage this employee")
+                            if manager:
+                                # Keep assignments at stores this manager cannot see.
+                                store_ids = sorted(set(store_ids) | {r["store_id"] for r in rows(con,
+                                    "SELECT store_id FROM employee_stores WHERE employee_id=?", (rid,))
+                                    if r["store_id"] not in user["store_ids"]})
                             prior_rates = {r["store_id"]:r["rate_cents"] for r in rows(con, "SELECT store_id,rate_cents FROM employee_stores WHERE employee_id=?", (rid,))}
                             active = boolean(body.get("active", True))
                             con.execute("UPDATE employees SET name=?,role=?,rate_cents=?,max_days=?,active=? WHERE id=?", (name, role, rate, max_days, active, rid))
@@ -947,8 +959,15 @@ class Handler(BaseHTTPRequestHandler):
                             action = "create"
                             prior_rates = {}
                         changed_rate = action == "update" and rate != old_employee["rate_cents"]
+                        def new_rate(s):
+                            # A manager's default-rate change only reprices their own stores.
+                            if changed_rate and (not manager or s in user["store_ids"]):
+                                return rate
+                            if manager and action == "update" and s not in user["store_ids"] and prior_rates.get(s) is None:
+                                return old_employee["rate_cents"]  # freeze other stores' effective rate
+                            return prior_rates.get(s, rate)
                         con.executemany("INSERT INTO employee_stores(employee_id,store_id,rate_cents) VALUES(?,?,?)",
-                                        ((rid, s, rate if changed_rate else prior_rates.get(s, rate)) for s in store_ids))
+                                        ((rid, s, new_rate(s)) for s in store_ids))
                         audit(con, user["username"], action, "employee", rid, {"name": name, "role": role, "rate_cents": rate, "max_days": max_days, "store_ids": store_ids})
                 return self.json(200, {"id": rid})
             if path == "/api/availability" and method == "POST":
@@ -1139,8 +1158,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not store_ids:
                     raise InputError("Assign at least one store to the manager")
                 password = body.get("password", "")
-                if not isinstance(password, str) or (password and len(password) < 12):
-                    raise InputError("Password must be at least 12 characters")
+                if not isinstance(password, str):
+                    raise InputError("Invalid password")
                 with db() as con:
                     with con:
                         for store in store_ids:
@@ -1160,8 +1179,8 @@ class Handler(BaseHTTPRequestHandler):
                             con.execute("DELETE FROM user_stores WHERE user_id=?", (rid,))
                             action = "update"
                         else:
-                            if len(password) < 12:
-                                raise InputError("Set an initial password of at least 12 characters")
+                            if not password:
+                                raise InputError("Set an initial password")
                             rid = con.execute("INSERT INTO users(username,password_hash,role,created_at) VALUES(?,?,'manager',?)",
                                               (username, hash_password(password), utc_now())).lastrowid
                             action = "create"
@@ -1172,8 +1191,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = self.read_json()
                 old_pw = body.get("current_password", "")
                 new_pw = body.get("new_password", "")
-                if not isinstance(new_pw, str) or len(new_pw) < 12:
-                    raise InputError("New password must be at least 12 characters")
+                if not isinstance(new_pw, str) or not new_pw:
+                    raise InputError("Enter a new password")
                 with db() as con:
                     with con:
                         row = con.execute("SELECT password_hash FROM users WHERE id=?", (user["id"],)).fetchone()

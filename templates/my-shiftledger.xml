@@ -7,7 +7,7 @@
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <WebUI>http://[IP]:[PORT:8080]</WebUI>
-  <Overview>StaffWeek by ShiftLedger: multi-store employee schedules, overnight shifts, manager logins, time tracking and estimated payroll. Data remains under /mnt/user/appdata/shiftledger/data. For a new database, supply a unique 12+ character initial owner password.</Overview>
+  <Overview>StaffWeek by ShiftLedger: multi-store employee schedules, overnight shifts, manager logins, time tracking and estimated payroll. Data remains under /mnt/user/appdata/shiftledger/data. For a new database, supply an initial owner password.</Overview>
   <Project>https://github.com/apatel1927/Schedule-Creator</Project>
   <TemplateURL>https://raw.githubusercontent.com/apatel1927/Schedule-Creator/main/templates/my-shiftledger.xml</TemplateURL>
   <ReadMe>https://raw.githubusercontent.com/apatel1927/Schedule-Creator/main/README.md</ReadMe>
@@ -17,5 +17,5 @@
   <Config Name="Persistent data" Target="/data" Default="/mnt/user/appdata/shiftledger/data" Mode="rw" Description="Keep this exact path when migrating; it holds your existing employees, stores, schedules and payroll records." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="Time zone" Target="TZ" Default="America/New_York" Description="Local business time zone." Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="Owner username on first startup" Target="ADMIN_USERNAME" Default="admin" Description="Only used if the database has no users; existing logins are preserved." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="Initial owner password" Target="ADMIN_PASSWORD" Default="" Description="For an existing ShiftLedger database leave blank; the existing login is preserved. For a brand new database supply a unique 12+ character password." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Initial owner password" Target="ADMIN_PASSWORD" Default="" Description="For an existing ShiftLedger database leave blank; the existing login is preserved. For a brand new database supply an initial password." Type="Variable" Display="advanced" Required="false" Mask="true"/>
 </Container>

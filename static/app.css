@@ -91,3 +91,109 @@
   .staffweek-table .data-table{min-width:0}
   .stats-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
 }
+
+/* ---- Availability windows ---- */
+.availability-heading .grow{flex:1;min-width:0}
+.avail-presets{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin:0 0 14px}
+.avail-grid{display:grid;gap:7px}
+.avail-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 10px;border:1px solid #dce3ee;border-radius:8px;background:#f8faff}
+.avail-row.off{background:#f6f6f7;color:#9aa3ae}
+.avail-day{display:flex;align-items:center;gap:8px;min-width:120px;font-weight:700;font-size:13px;cursor:pointer}
+.avail-day input{width:18px;height:18px;accent-color:#2355ab;margin:0}
+.avail-row select{max-width:none;padding:8px 26px 8px 10px}
+.avail-times{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#657188}
+.avail-times input{padding:7px 8px;font-size:13px}
+.avail-off-label{display:none;font-size:12px}
+.avail-row.off select,.avail-row.off .avail-times{display:none}
+.avail-row.off .avail-off-label{display:inline}
+.avail-save{display:flex;justify-content:flex-end;margin-top:12px}
+/* ---- Nav count, lists, time off ---- */
+.nav-count{background:#f0a43a;color:#172b52;border-radius:99px;padding:1px 7px;font-size:11px;font-weight:800;margin-left:6px}
+.timeoff-tabs{display:inline-flex;margin:0 0 14px;flex-wrap:wrap}
+.list-card{overflow:hidden}
+.list-row{display:flex;align-items:center;gap:12px;padding:14px 18px;border-top:1px solid #eef1f5}
+.list-row:first-child{border-top:0}
+.list-row .grow{flex:1;min-width:0}
+.list-row strong{font-size:13px;display:block}
+.list-row small{display:block;color:#7c8798;font-size:12px;margin-top:3px}
+.list-row small.reason{color:#425a83;font-style:italic}
+.row-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end}
+.off-note{color:#ae7523!important;font-weight:700}
+/* ---- Hours panel ---- */
+.hours-panel{margin-bottom:17px}
+.hours-total{font-size:15px;color:#172b52;white-space:nowrap}
+.hours-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:0 18px;padding:0 20px 14px}
+.hours-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-top:1px solid #f0f2f6}
+.hours-row .table-person{min-width:0}
+.hours-row .table-person strong{font-size:13px;display:block}
+.hours-row .table-person small{font-size:11px;color:#7c8798;display:block;margin-top:2px}
+.hours-figs{text-align:right;flex:none}
+.hours-figs strong{display:block;font-size:14px}
+.hours-figs small{color:#7c8798;font-size:11px}
+/* ---- Employee portal ---- */
+.week-switch{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;margin-bottom:14px}
+.week-switch div{text-align:center}
+.week-switch strong{display:block;font-size:16px}
+.week-switch small{color:#657188;font-size:12px}
+.my-week{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:14px}
+.my-day{padding:14px 16px}
+.my-day.today{box-shadow:inset 0 3px #2355ab,0 2px 9px #d8dfeb}
+.my-day-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.my-day-head strong{display:block;font-size:14px}
+.my-day-head small{color:#7c8798;font-size:12px}
+.my-shift-chip{background:#2355ab;color:#fff;border-radius:7px;padding:6px 10px;font-weight:700;font-size:13px}
+.team-list{margin-top:10px;border-top:1px solid #eef1f5;padding-top:8px}
+.team-line{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:4px 0;color:#425a83}
+.team-line.mine{font-weight:800;color:#172b52}
+/* ---- Mobile ---- */
+.staffweek-table{overflow:auto}
+@media(max-width:700px){
+  .staffweek-nav{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;margin:0 -17px 14px;padding:0 17px 4px}
+  .staffweek-nav::-webkit-scrollbar{display:none}
+  .staffweek-brand p{display:none}
+  .staffweek-context{gap:10px}
+  .heading-actions{width:100%}
+  .heading-actions select{flex:1;max-width:none}
+  .filter-strip .tab-note{width:100%}
+  .filter-strip .spacer{display:none}
+  .stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .modal-root{padding:0;align-items:flex-end}
+  .modal-panel{max-width:none;border-radius:16px 16px 0 0;max-height:94vh}
+  .modal-body input,.modal-body select,.modal-body textarea{font-size:16px}
+  .login-card input{font-size:16px}
+  .toast{left:12px;right:12px;bottom:14px;max-width:none}
+  .list-row{flex-wrap:wrap}
+  .row-actions{width:100%;justify-content:flex-start}
+  .avail-day{min-width:0;flex:1 1 100%}
+  .avail-row select{flex:1}
+  .card-header{flex-wrap:wrap}
+  .hours-list{grid-template-columns:1fr;padding:0 14px 10px}
+  .calendar-toolbar{padding:14px}
+  .btn{padding:10px 12px}
+}
+@media(max-width:550px){
+  .staffweek-header{padding:14px 16px}
+  .staffweek-header-inner{flex-direction:row;align-items:center}
+  .staffweek-account{width:auto}
+  .staffweek-account div:not(.user-avatar){display:none}
+  .staffweek-brand h1{font-size:21px}
+  .staffweek-brand h1 small{display:none}
+  .staffweek-main{padding:14px}
+  .staffweek-nav{margin:0 -14px 12px;padding:0 14px 4px}
+  .my-week{grid-template-columns:1fr}
+}
+.name-btn{border:0;background:none;padding:0;font:inherit;color:#172b52;font-weight:700;text-align:left;text-decoration:underline dotted #9fb0cc;text-underline-offset:3px}
+@media(max-width:700px){.avail-day{flex:1 1 120px}.avail-row select{flex:1 1 150px}.avail-times{flex:1 1 100%}.avail-times input{flex:1;min-width:0}}
+/* ---- Locked shifts ---- */
+.lock-section{margin-top:16px;border-top:1px solid #e5e9f0;padding-top:14px}
+.lock-title strong{display:block;font-size:14px}
+.lock-title span{display:block;font-size:12px;color:#657188;margin:3px 0 10px}
+.lock-store{margin-bottom:12px}
+.lock-store-name{font-weight:800;font-size:12px;border-left:4px solid #2355ab;padding-left:8px;margin-bottom:8px}
+.lock-table{display:grid;gap:6px;align-items:center}
+.lock-head{font-size:11px;font-weight:800;color:#586985;text-align:center;line-height:1.3}
+.lock-head small{display:block;font-weight:500;color:#8994a6}
+.lock-day{font-size:12px;font-weight:700}
+.lock-btn{border:1px solid #dce3ee;background:#fff;border-radius:8px;padding:9px 4px;font-size:12px;font-weight:700;color:#425a83;min-height:40px}
+.lock-btn.on{background:#e7effe;border-color:#2355ab;color:#172b52}
+.lock-btn:disabled{opacity:.45;cursor:default}

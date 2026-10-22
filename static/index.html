@@ -37,7 +37,7 @@
         <input id="login-pass" type="password" name="password" autocomplete="current-password" placeholder="Enter your password" required>
         <p id="login-error" class="form-error" role="alert"></p>
         <button class="btn primary sign-in" type="submit">Sign in <span>→</span></button>
-        <p class="login-helper">Accounts are managed by your system owner.</p>
+        <p class="login-helper">Owners, managers and employees all sign in here. Ask your manager if you need a login.</p>
       </form>
     </div>
   </div>
@@ -51,15 +51,18 @@
     </header>
     <main class="staffweek-main">
       <nav id="navigation" class="staffweek-nav" aria-label="Main navigation">
-        <button data-view="employees" class="nav-link">Employees</button>
-        <button data-view="availability" class="nav-link">Availability</button>
-        <button data-view="schedule" class="nav-link active">Schedule</button>
-        <button data-view="time" class="nav-link">Time &amp; tasks</button>
+        <button data-view="employees" class="nav-link staff-only">Employees</button>
+        <button data-view="availability" class="nav-link staff-only">Availability</button>
+        <button data-view="schedule" class="nav-link staff-only active">Schedule</button>
+        <button data-view="timeoff" class="nav-link staff-only">Time off <span id="timeoff-count" class="nav-count hidden"></span></button>
+        <button data-view="time" class="nav-link staff-only">Time &amp; tasks</button>
         <button data-view="payroll" class="nav-link owner-only">Payroll</button>
-        <button data-view="stores" class="nav-link">Stores &amp; settings</button>
+        <button data-view="stores" class="nav-link staff-only">Stores &amp; settings</button>
         <button data-view="managers" class="nav-link owner-only">Manager logins</button>
+        <button data-view="my-schedule" class="nav-link employee-only hidden">My schedule</button>
+        <button data-view="my-timeoff" class="nav-link employee-only hidden">Time off</button>
       </nav>
-      <div class="staffweek-context"><span id="header-today"></span><span>Viewing: <strong id="crumb-page">Schedule</strong></span><button class="btn primary" data-action="new-shift">＋ Add shift</button></div>
+      <div class="staffweek-context"><span id="header-today"></span><span>Viewing: <strong id="crumb-page">Schedule</strong></span><button class="btn primary staff-only" data-action="new-shift">＋ Add shift</button></div>
       <div id="page" class="page-content"></div>
     </main>
   </div>

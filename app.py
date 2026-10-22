@@ -120,6 +120,19 @@ def init_db():
             deleted_at TEXT, created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS entries_date_idx ON time_entries(entry_date, employee_id);
+        CREATE TABLE IF NOT EXISTS time_off (
+            id INTEGER PRIMARY KEY, employee_id INTEGER NOT NULL REFERENCES employees(id),
+            start_date TEXT NOT NULL, end_date TEXT NOT NULL, start_time TEXT, end_time TEXT,
+            reason TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
+            requested_by TEXT NOT NULL, reviewed_by TEXT, reviewed_at TEXT,
+            review_note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS time_off_emp_idx ON time_off(employee_id, start_date, end_date);
+        CREATE TABLE IF NOT EXISTS shift_locks (
+            employee_id INTEGER NOT NULL REFERENCES employees(id), store_id INTEGER NOT NULL REFERENCES stores(id),
+            weekday INTEGER NOT NULL CHECK(weekday BETWEEN 0 AND 6), template_key TEXT NOT NULL,
+            PRIMARY KEY(employee_id, store_id, weekday, template_key)
+        );
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY, username TEXT NOT NULL, action TEXT NOT NULL,
             entity TEXT NOT NULL, entity_id INTEGER, details TEXT NOT NULL, created_at TEXT NOT NULL
@@ -130,6 +143,8 @@ def init_db():
             con.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'owner'")
         if "active" not in columns:
             con.execute("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+        if "employee_id" not in columns:
+            con.execute("ALTER TABLE users ADD COLUMN employee_id INTEGER REFERENCES employees(id)")
         store_columns = [row[1] for row in con.execute("PRAGMA table_info(employee_stores)")]
         if "rate_cents" not in store_columns:
             con.execute("ALTER TABLE employee_stores ADD COLUMN rate_cents INTEGER")
@@ -138,6 +153,9 @@ def init_db():
             con.execute("ALTER TABLE employees ADD COLUMN max_days INTEGER NOT NULL DEFAULT 5")
         if "availability_json" not in employee_columns:
             con.execute("ALTER TABLE employees ADD COLUMN availability_json TEXT NOT NULL DEFAULT '[1,1,1,1,1,1,1]'")
+        if "availability_hours_json" not in employee_columns:
+            # Per weekday: null = any time that day, or ["HH:MM","HH:MM"] window (end may be next day).
+            con.execute("ALTER TABLE employees ADD COLUMN availability_hours_json TEXT")
         store_columns = [row[1] for row in con.execute("PRAGMA table_info(stores)")]
         for column, ddl in (
             ("open_time", "TEXT NOT NULL DEFAULT '09:00'"),
@@ -273,6 +291,36 @@ def availability_payload(value):
     return json.dumps([int(day in value) for day in range(7)])
 
 
+def availability_hours_payload(value):
+    """7 entries, each null (any time) or {start_time,end_time}; end <= start means next day."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) != 7:
+        raise InputError("Set availability hours for all seven weekdays")
+    out = []
+    for item in value:
+        if item is None:
+            out.append(None)
+            continue
+        if not isinstance(item, dict):
+            raise InputError("Invalid availability hours")
+        st, en = item.get("start_time"), item.get("end_time")
+        if as_time(st) == as_time(en):
+            raise InputError("Availability start and end times cannot be the same")
+        out.append([st, en])
+    return json.dumps(out) if any(out) else None
+
+
+def window_range(start, end, base=0):
+    a, b = as_time(start), as_time(end)
+    return base + a, base + b + (1440 if b <= a else 0)
+
+
+def time_label(value):
+    h, m = map(int, value.split(":"))
+    return f"{(h % 12) or 12}:{m:02d} {'AM' if h < 12 else 'PM'}"
+
+
 def can_manage_employee(con, user, employee_id):
     if user["role"] == "owner":
         return True
@@ -285,7 +333,25 @@ def validate_employee_shift(con, employee_id, day, start, end, skip_id=None):
     emp = ensure_record(con, "employees", employee_id, True)
     weekday = as_date(day).weekday()
     if not json.loads(emp["availability_json"])[weekday]:
-        raise InputError(f"Employee is unavailable on {as_date(day).strftime('%A')}")
+        raise InputError(f"{emp['name']} is unavailable on {as_date(day).strftime('%A')}s")
+    windows = json.loads(emp.get("availability_hours_json") or "null")
+    if windows and windows[weekday]:
+        ws, we = windows[weekday]
+        a1, a2 = window_range(start, end)
+        w1, w2 = window_range(ws, we)
+        if a1 < w1 or a2 > w2:
+            raise InputError(f"{emp['name']} is only available {time_label(ws)}–{time_label(we)} on "
+                             f"{as_date(day).strftime('%A')}s")
+    for off in rows(con, """SELECT start_date,end_date,start_time,end_time FROM time_off
+                   WHERE employee_id=? AND status='approved' AND start_date<=? AND end_date>=?""",
+                    (employee_id, day, day)):
+        if not off["start_time"]:
+            raise InputError(f"{emp['name']} has approved time off on {day}")
+        o1, o2 = window_range(off["start_time"], off["end_time"])
+        a1, a2 = window_range(start, end)
+        if a1 < o2 and o1 < a2:
+            raise InputError(f"{emp['name']} has approved time off {time_label(off['start_time'])}–"
+                             f"{time_label(off['end_time'])} on {day}")
     previous = rows(con, """SELECT id,shift_date,start_time,end_time FROM shifts
                    WHERE employee_id=? AND deleted_at IS NULL AND shift_date BETWEEN ? AND ?""",
                     (employee_id, (week_monday(as_date(day))-timedelta(days=1)).isoformat(),
@@ -372,12 +438,16 @@ def list_data(user):
                 "employee_stores": rows(con, "SELECT * FROM employee_stores ORDER BY employee_id,store_id"),
                 "shifts": rows(con, "SELECT * FROM shifts WHERE deleted_at IS NULL ORDER BY shift_date,start_time,id"),
                 "entries": rows(con, "SELECT * FROM time_entries WHERE deleted_at IS NULL ORDER BY entry_date DESC,id DESC"),
+                "time_off": rows(con, "SELECT * FROM time_off ORDER BY start_date DESC,id DESC"),
+                "employee_logins": rows(con, "SELECT id,username,active,employee_id FROM users WHERE role='employee'"),
+                "shift_locks": rows(con, "SELECT * FROM shift_locks"),
             }
         allowed = user["store_ids"]
         if not allowed:
-            return {"stores": [], "employees": [], "employee_stores": [], "shifts": [], "entries": []}
+            return {"stores": [], "employees": [], "employee_stores": [], "shifts": [], "entries": [],
+                    "time_off": [], "employee_logins": [], "shift_locks": []}
         placeholders = ",".join("?" for _ in allowed)
-        employees = rows(con, f"""SELECT DISTINCT e.id,e.name,e.role,e.rate_cents,e.max_days,e.availability_json,e.active,e.created_at FROM employees e
+        employees = rows(con, f"""SELECT DISTINCT e.id,e.name,e.role,e.rate_cents,e.max_days,e.availability_json,e.availability_hours_json,e.active,e.created_at FROM employees e
                          JOIN employee_stores es ON es.employee_id=e.id WHERE es.store_id IN ({placeholders})
                          ORDER BY e.active DESC,e.name""", allowed)
         return {
@@ -390,7 +460,51 @@ def list_data(user):
             "entries": rows(con, f"""SELECT id,employee_id,store_id,entry_date,category,start_time,end_time,break_minutes,
                          minutes,notes,shift_id,created_at FROM time_entries WHERE deleted_at IS NULL
                          AND store_id IN ({placeholders}) ORDER BY entry_date DESC,id DESC""", allowed),
+            "time_off": rows(con, f"""SELECT * FROM time_off WHERE employee_id IN (SELECT employee_id FROM employee_stores
+                         WHERE store_id IN ({placeholders})) ORDER BY start_date DESC,id DESC""", allowed),
+            "employee_logins": rows(con, f"""SELECT id,username,active,employee_id FROM users WHERE role='employee'
+                         AND employee_id IN (SELECT employee_id FROM employee_stores WHERE store_id IN ({placeholders}))""", allowed),
+            "shift_locks": rows(con, f"SELECT * FROM shift_locks WHERE store_id IN ({placeholders})", allowed),
         }
+
+
+def employee_portal(user, week_start):
+    monday_date = as_date(week_start)
+    if monday_date.weekday() != 0:
+        raise InputError("Week start must be a Monday")
+    last = (monday_date + timedelta(days=6)).isoformat()
+    with db() as con:
+        emp = ensure_record(con, "employees", user["employee_id"])
+        allowed = user["store_ids"] or [0]
+        marks = ",".join("?" for _ in allowed)
+        stores = rows(con, f"SELECT id,name,color FROM stores WHERE active=1 AND id IN ({marks}) ORDER BY name", allowed)
+        shifts = rows(con, f"""SELECT sh.id,sh.employee_id,sh.store_id,sh.shift_date,sh.start_time,sh.end_time,
+                    sh.break_minutes,sh.notes,e.name AS employee_name FROM shifts sh JOIN employees e ON e.id=sh.employee_id
+                    WHERE sh.deleted_at IS NULL AND sh.status='published' AND sh.store_id IN ({marks})
+                    AND sh.shift_date BETWEEN ? AND ? ORDER BY sh.shift_date,sh.start_time,e.name""",
+                      (*allowed, monday_date.isoformat(), last))
+        time_off = rows(con, "SELECT * FROM time_off WHERE employee_id=? ORDER BY start_date DESC,id DESC LIMIT 100",
+                        (emp["id"],))
+    return {"employee": {k: emp[k] for k in ("id", "name", "role", "max_days", "availability_json",
+                                               "availability_hours_json")},
+            "stores": stores, "week_start": monday_date.isoformat(), "week_end": last,
+            "shifts": shifts, "time_off": time_off}
+
+
+def time_off_payload(body):
+    first, last = as_date(body.get("start_date")), as_date(body.get("end_date") or body.get("start_date"))
+    if last < first or (last - first).days > 365:
+        raise InputError("End date must be on or after the start date (up to one year)")
+    st, en = body.get("start_time") or None, body.get("end_time") or None
+    if st or en:
+        if not (st and en):
+            raise InputError("Provide both start and end times, or leave both blank for the whole day")
+        if first != last:
+            raise InputError("Partial-day time off must be a single date")
+        if as_time(st) == as_time(en):
+            raise InputError("Start and end times cannot be the same")
+    reason = require_string(body.get("reason", ""), "Reason", 300, True)
+    return first.isoformat(), last.isoformat(), st, en, reason
 
 
 def authorize_store(user, store_id):
@@ -574,6 +688,8 @@ def generate_week(user, store_id, week_start):
                 if sh["store_id"] == store_id:
                     day_store_count[sh["shift_date"]] = day_store_count.get(sh["shift_date"], 0) + 1
             templates = json.loads(store["shift_templates_json"] or "null")
+            locks = {(r["employee_id"], r["weekday"], r["template_key"]) for r in rows(con,
+                     "SELECT employee_id,weekday,template_key FROM shift_locks WHERE store_id=?", (store_id,))}
             open_min, close_min = as_time(store["open_time"]), as_time(store["close_time"])
             span = (close_min - open_min) % 1440
             duration = min(store["slot_minutes"], span)
@@ -610,20 +726,33 @@ def generate_week(user, store_id, week_start):
                     for block in templates:
                         missing = max(0, block["staffing"][weekday] - counted[block["id"]])
                         block_mins = shift_minutes(block["start_time"], block["end_time"], block["break_minutes"])
+                        # People locked to this shift are placed first, every week.
+                        locked_queue = [c for c in employees if (c["id"], weekday, block["id"]) in locks]
                         for slot in range(missing):
-                            eligible = []
-                            for candidate in employees:
-                                if candidate["id"] in busy or total_mins.get(candidate["id"], 0) + block_mins > 2400:
+                            emp = None
+                            while locked_queue and emp is None:
+                                cand = locked_queue.pop(0)
+                                if cand["id"] in busy:
                                     continue
                                 try:
-                                    validate_employee_shift(con, candidate["id"], day, block["start_time"], block["end_time"])
+                                    validate_employee_shift(con, cand["id"], day, block["start_time"], block["end_time"])
+                                    emp = cand
                                 except InputError:
                                     continue
-                                eligible.append(candidate)
-                            if not eligible:
-                                unfilled.append({"date": day, "shift": block["name"], "remaining": missing - slot})
-                                break
-                            emp = min(eligible, key=lambda item: (total_mins.get(item["id"], 0), item["id"]))
+                            if emp is None:
+                                eligible = []
+                                for candidate in employees:
+                                    if candidate["id"] in busy or total_mins.get(candidate["id"], 0) + block_mins > 2400:
+                                        continue
+                                    try:
+                                        validate_employee_shift(con, candidate["id"], day, block["start_time"], block["end_time"])
+                                    except InputError:
+                                        continue
+                                    eligible.append(candidate)
+                                if not eligible:
+                                    unfilled.append({"date": day, "shift": block["name"], "remaining": missing - slot})
+                                    break
+                                emp = min(eligible, key=lambda item: (total_mins.get(item["id"], 0), item["id"]))
                             rid = con.execute("""INSERT INTO shifts(employee_id,store_id,shift_date,start_time,end_time,
                                 break_minutes,notes,status,generated,template_key,created_at)
                                 VALUES(?,?,?,?,?,?,?,'draft',1,?,?)""",
@@ -726,6 +855,9 @@ def calculate_payroll(start, end, store_filter=None):
 
 
 ASSET_VERSIONS = {}
+# The only things an employee login may do.
+EMPLOYEE_ENDPOINTS = {("GET", "/api/session"), ("POST", "/api/logout"), ("GET", "/api/me"),
+                      ("POST", "/api/time-off"), ("POST", "/api/time-off/cancel"), ("POST", "/api/change-password")}
 
 
 def asset_version(name):
@@ -789,12 +921,19 @@ class Handler(BaseHTTPRequestHandler):
             return None
         digest = hashlib.sha256(token.encode()).hexdigest()
         with db() as con:
-            row = con.execute("""SELECT u.id,u.username,u.role,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id
-                                 WHERE s.token_hash=? AND s.expires_at>? AND u.active=1""", (digest, int(time.time()))).fetchone()
+            row = con.execute("""SELECT u.id,u.username,u.role,u.employee_id,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id
+                                 LEFT JOIN employees e ON e.id=u.employee_id
+                                 WHERE s.token_hash=? AND s.expires_at>? AND u.active=1
+                                 AND (u.role!='employee' OR e.active=1)""", (digest, int(time.time()))).fetchone()
             if not row:
                 return None
             user = dict(row)
-            user["store_ids"] = [r[0] for r in con.execute("SELECT store_id FROM user_stores WHERE user_id=?", (user["id"],))]
+            if user["role"] == "employee":
+                user["store_ids"] = [r[0] for r in con.execute("SELECT store_id FROM employee_stores WHERE employee_id=?",
+                                                               (user["employee_id"],))]
+                user["employee_name"] = con.execute("SELECT name FROM employees WHERE id=?", (user["employee_id"],)).fetchone()[0]
+            else:
+                user["store_ids"] = [r[0] for r in con.execute("SELECT store_id FROM user_stores WHERE user_id=?", (user["id"],))]
         return user
 
     def cookie_header(self, token, age=SESSION_TTL):
@@ -830,7 +969,9 @@ class Handler(BaseHTTPRequestHandler):
                     if len(recent) >= 10:
                         return self.json(429, {"error": "Too many sign-in attempts. Try again in five minutes."})
                 with db() as con:
-                    row = con.execute("SELECT id,password_hash,role FROM users WHERE username=? AND active=1", (username,)).fetchone()
+                    row = con.execute("""SELECT u.id,u.password_hash,u.role FROM users u LEFT JOIN employees e ON e.id=u.employee_id
+                                         WHERE u.username=? AND u.active=1 AND (u.role!='employee' OR e.active=1)""",
+                                      (username,)).fetchone()
                     if not row or not check_password(password, row["password_hash"]):
                         with LOGIN_LOCK:
                             LOGIN_GUARD[remote] = recent + [now]
@@ -849,6 +990,95 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(401, {"error": "Sign in required"})
             if method != "GET" and self.headers.get("X-CSRF-Token") != user["csrf"]:
                 return self.json(403, {"error": "Security token expired. Refresh the page."})
+            if user["role"] == "employee" and (method, path) not in EMPLOYEE_ENDPOINTS:
+                return self.json(403, {"error": "Employee logins can only view the schedule and request time off"})
+            if path == "/api/me" and method == "GET":
+                if user["role"] != "employee":
+                    raise InputError("Only employee logins have a personal schedule")
+                return self.json(200, employee_portal(user, params.get("week_start", [""])[0]))
+            if path == "/api/time-off" and method == "POST":
+                body = self.read_json()
+                first, last, st, en, reason = time_off_payload(body)
+                with db() as con:
+                    with con:
+                        if user["role"] == "employee":
+                            employee_id, status = user["employee_id"], "pending"
+                        else:
+                            # Managers/owner can record time off for an employee; it is approved immediately.
+                            employee_id, status = positive_id(body.get("employee_id"), "employee"), "approved"
+                            ensure_record(con, "employees", employee_id)
+                            if not can_manage_employee(con, user, employee_id):
+                                raise PermissionError("You do not manage this employee")
+                        rid = con.execute("""INSERT INTO time_off(employee_id,start_date,end_date,start_time,end_time,reason,status,
+                                             requested_by,reviewed_by,reviewed_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                                          (employee_id, first, last, st, en, reason, status, user["username"],
+                                           user["username"] if status == "approved" else None,
+                                           utc_now() if status == "approved" else None, utc_now())).lastrowid
+                        audit(con, user["username"], "request" if status == "pending" else "record", "time_off", rid, body)
+                return self.json(200, {"id": rid, "status": status})
+            if path in ("/api/time-off/review", "/api/time-off/cancel") and method == "POST":
+                body = self.read_json()
+                rid = positive_id(body.get("id"), "request")
+                with db() as con:
+                    with con:
+                        req = con.execute("SELECT * FROM time_off WHERE id=?", (rid,)).fetchone()
+                        if not req:
+                            raise InputError("Time-off request not found")
+                        req = dict(req)
+                        if user["role"] == "employee":
+                            if path.endswith("review") or req["employee_id"] != user["employee_id"]:
+                                raise PermissionError("Not allowed")
+                            if req["status"] != "pending":
+                                raise InputError("Only pending requests can be cancelled; ask your manager")
+                            new_status, note = "cancelled", ""
+                        else:
+                            if not can_manage_employee(con, user, req["employee_id"]):
+                                raise PermissionError("You do not manage this employee")
+                            if path.endswith("cancel"):
+                                new_status = "cancelled"
+                            else:
+                                new_status = body.get("status")
+                                if new_status not in ("approved", "denied"):
+                                    raise InputError("Choose approve or deny")
+                            note = require_string(body.get("note", ""), "Note", 300, True)
+                        con.execute("UPDATE time_off SET status=?,reviewed_by=?,reviewed_at=?,review_note=? WHERE id=?",
+                                    (new_status, user["username"], utc_now(), note, rid))
+                        audit(con, user["username"], new_status, "time_off", rid, {"before": req["status"], "note": note})
+                return self.json(200, {"ok": True, "status": new_status})
+            if path == "/api/employee-login" and method == "POST":
+                body = self.read_json()
+                employee_id = positive_id(body.get("employee_id"), "employee")
+                username = require_string(body.get("username", ""), "Username", 80)
+                if not username.replace("_", "").replace("-", "").replace(".", "").isalnum():
+                    raise InputError("Username may contain letters, numbers, . _ and -")
+                password = body.get("password", "")
+                if not isinstance(password, str):
+                    raise InputError("Invalid password")
+                active = boolean(body.get("active", True))
+                with db() as con:
+                    with con:
+                        ensure_record(con, "employees", employee_id)
+                        if not can_manage_employee(con, user, employee_id):
+                            raise PermissionError("You do not manage this employee")
+                        existing = con.execute("SELECT id FROM users WHERE role='employee' AND employee_id=?",
+                                               (employee_id,)).fetchone()
+                        if existing:
+                            rid = existing["id"]
+                            con.execute("UPDATE users SET username=?,active=? WHERE id=?", (username, active, rid))
+                            if password:
+                                con.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(password), rid))
+                            if password or not active:
+                                con.execute("DELETE FROM sessions WHERE user_id=?", (rid,))
+                            action = "update"
+                        else:
+                            if not password:
+                                raise InputError("Set an initial password")
+                            rid = con.execute("""INSERT INTO users(username,password_hash,role,active,employee_id,created_at)
+                                                 VALUES(?,?,'employee',?,?,?)""",
+                                              (username, hash_password(password), active, employee_id, utc_now())).lastrowid
+                            action = "create"
+                        audit(con, user["username"], action, "employee_login", rid, {"employee_id": employee_id, "username": username})
+                return self.json(200, {"id": rid})
             if path == "/api/logout" and method == "POST":
                 cookie = SimpleCookie()
                 cookie.load(self.headers.get("Cookie", ""))
@@ -974,16 +1204,47 @@ class Handler(BaseHTTPRequestHandler):
                 body = self.read_json()
                 employee_id = positive_id(body.get("employee_id"), "employee")
                 availability = availability_payload(body.get("weekdays"))
+                hours = availability_hours_payload(body.get("hours"))
                 with db() as con:
                     with con:
                         ensure_record(con, "employees", employee_id)
                         if not can_manage_employee(con, user, employee_id):
                             raise PermissionError("You do not manage this employee")
                         previous = con.execute("SELECT availability_json FROM employees WHERE id=?", (employee_id,)).fetchone()[0]
-                        con.execute("UPDATE employees SET availability_json=? WHERE id=?", (availability, employee_id))
+                        con.execute("UPDATE employees SET availability_json=?,availability_hours_json=? WHERE id=?",
+                                    (availability, hours, employee_id))
                         audit(con, user["username"], "update_availability", "employee", employee_id,
-                              {"previous": json.loads(previous), "new": json.loads(availability)})
+                              {"previous": json.loads(previous), "new": json.loads(availability),
+                               "hours": json.loads(hours or "null")})
                 return self.json(200, {"ok": True})
+            if path == "/api/shift-locks" and method == "POST":
+                body = self.read_json()
+                employee_id = positive_id(body.get("employee_id"), "employee")
+                store_id = positive_id(body.get("store_id"), "store")
+                authorize_store(user, store_id)
+                locks = body.get("locks", [])
+                if not isinstance(locks, list) or len(locks) > 100:
+                    raise InputError("Invalid locked shifts")
+                with db() as con:
+                    with con:
+                        ensure_employee_store(con, employee_id, store_id)
+                        store = ensure_record(con, "stores", store_id)
+                        keys = {b["id"] for b in json.loads(store["shift_templates_json"] or "[]")}
+                        clean = set()
+                        for item in locks:
+                            if not isinstance(item, dict):
+                                raise InputError("Invalid locked shift")
+                            wd = integer_range(item.get("weekday"), "Weekday", 0, 6)
+                            key = item.get("template_key")
+                            if key not in keys:
+                                raise InputError("Set up this store's shifts under Staffing setup first")
+                            clean.add((wd, key))
+                        con.execute("DELETE FROM shift_locks WHERE employee_id=? AND store_id=?", (employee_id, store_id))
+                        con.executemany("INSERT INTO shift_locks(employee_id,store_id,weekday,template_key) VALUES(?,?,?,?)",
+                                        ((employee_id, store_id, wd, key) for wd, key in sorted(clean)))
+                        audit(con, user["username"], "set_shift_locks", "employee", employee_id,
+                              {"store_id": store_id, "locks": sorted(clean)})
+                return self.json(200, {"ok": True, "count": len(clean)})
             if path == "/api/store-rate" and method == "POST":
                 body = self.read_json()
                 employee_id = positive_id(body.get("employee_id"), "employee")

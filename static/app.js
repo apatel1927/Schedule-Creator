@@ -21,6 +21,9 @@ const timeMinute = s => {const [h,m]=s.split(':').map(Number);return h*60+m;};
 const clockTime = n => `${String(Math.floor((n+1440)%1440/60)).padStart(2,'0')}:${String((n+1440)%60).padStart(2,'0')}`;
 const shiftMins = s => {let [a,b]=[s.start_time,s.end_time].map(v=>{const [h,m]=v.split(':').map(Number);return h*60+m;});let duration=(b-a+1440)%1440;return Math.max(0,duration-(s.break_minutes||0));};
 const isOwner = () => state.session?.role === 'owner';
+const isEmployee = () => state.session?.role === 'employee';
+const DAY_NAMES=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+const AVAIL_PRESETS={any:{label:'Any time, every day',days:[1,1,1,1,1,1,1],hours:null},weekdays:{label:'Weekdays only',days:[1,1,1,1,1,0,0],hours:null},mornings:{label:'Mornings only',days:[1,1,1,1,1,1,1],hours:['06:00','14:00']},evenings:{label:'Evenings only',days:[1,1,1,1,1,1,1],hours:['14:00','02:00']}};
 const getStore = id => state.data?.stores.find(s => s.id === Number(id));
 const getEmployee = id => state.data?.employees.find(e => e.id === Number(id));
 const avatar = (employee, extra='') => `<div class="avatar a${(employee?.id||0)%4} ${extra}">${esc((employee?.name||'?').split(/\s+/).slice(0,2).map(w=>w[0]).join('').toUpperCase())}</div>`;
@@ -51,12 +54,18 @@ function logoutLocal() {
   $('#login-pass').value='';
 }
 async function loadData() {
+  if(isEmployee()){
+    state.me=await api('/api/me?week_start='+localDay(monday(state.cursor)));
+    state.data={stores:state.me.stores,employees:[],employee_stores:[],shifts:[],entries:[],time_off:[],employee_logins:[]};
+    return;
+  }
   state.data=await api('/api/data');
   if(!state.data.stores.some(s=>String(s.id)===String(state.store))) {
     state.store=String(state.data.stores.find(s=>s.active)?.id||'all');
   }
 }
 async function loadEstimate() {
+  if(isEmployee()){state.estimate=null;return loadData();}
   const mondayDay=localDay(monday(state.cursor));
   const q=new URLSearchParams({week_start:mondayDay});
   if(state.store!=='all')q.set('store_id',state.store);
@@ -71,10 +80,14 @@ async function start() {
 function showApp() {
   $('#login-screen').classList.add('hidden');$('#app').classList.remove('hidden');
   $('#current-user').textContent=state.session.username;
-  $('#current-role').textContent=isOwner()?'Owner account':'Store manager';
+  $('#current-role').textContent=isOwner()?'Owner account':isEmployee()?'Employee':'Store manager';
   $('#user-avatar').textContent=state.session.username[0].toUpperCase();
   $$('.owner-only').forEach(el=>el.classList.toggle('hidden',!isOwner()));
+  $$('.staff-only').forEach(el=>el.classList.toggle('hidden',isEmployee()));
+  $$('.employee-only').forEach(el=>el.classList.toggle('hidden',!isEmployee()));
   if (state.view==='payroll'&&!isOwner()) state.view='schedule';
+  if (isEmployee()&&!['my-schedule','my-timeoff'].includes(state.view)) state.view='my-schedule';
+  if (!isEmployee()&&state.view.startsWith('my-')) state.view='schedule';
   render();
 }
 function allStores() {return state.data?.stores||[];}
@@ -87,9 +100,11 @@ function commonStoreSelector() {return `<select id="global-store" aria-label="Fi
 function render() {
   if (!state.data) return;
   $$('.nav-link').forEach(el=>el.classList.toggle('active',el.dataset.view===state.view));
-  const titles={overview:'Overview',schedule:'Schedule',employees:'Employees',availability:'Availability',time:'Time & tasks',payroll:'Payroll',stores:'Stores & settings',managers:'Manager logins'};
+  const titles={overview:'Overview',schedule:'Schedule',employees:'Employees',availability:'Availability',time:'Time & tasks',payroll:'Payroll',stores:'Stores & settings',managers:'Manager logins',timeoff:'Time off','my-schedule':'My schedule','my-timeoff':'My time off'};
   $('#crumb-page').textContent=titles[state.view];
-  $('#page').innerHTML=({overview:renderOverview,schedule:renderSchedule,employees:renderEmployees,availability:renderAvailability,time:renderTime,payroll:renderPayroll,stores:renderStores,managers:renderManagers}[state.view]||renderSchedule)();
+  const pending=(state.data.time_off||[]).filter(t=>t.status==='pending').length;
+  const badgeEl=$('#timeoff-count');if(badgeEl){badgeEl.textContent=pending||'';badgeEl.classList.toggle('hidden',!pending);}
+  $('#page').innerHTML=({overview:renderOverview,schedule:renderSchedule,employees:renderEmployees,availability:renderAvailability,time:renderTime,payroll:renderPayroll,stores:renderStores,managers:renderManagers,timeoff:renderTimeOff,'my-schedule':renderMySchedule,'my-timeoff':renderMyTimeOff}[state.view]||renderSchedule)();
 }
 function renderOverview() {
   const now=new Date(), first=localDay(monday(now)), last=localDay(addDays(monday(now),6));
@@ -127,10 +142,28 @@ function renderWeekTable() {
     const shifts=visibleShifts().filter(s=>s.store_id===store.id&&s.shift_date>=localDay(beginning)&&s.shift_date<=localDay(addDays(beginning,6)));
     const rows=days.map((day,i)=>{
       const date=localDay(addDays(beginning,i)), daily=shifts.filter(s=>s.shift_date===date);
-      return (daily.length?daily:[null]).map((shift,index)=>`<tr><td><strong>${index===0?day:''}</strong><small>${index===0?shortDate(date):''}</small></td><td>${shift?esc(getEmployee(shift.employee_id)?.name||'Unknown employee'):'<span class="muted">No shifts</span>'}</td><td>${shift?shiftLabel(shift):'—'}</td><td>${shift?hours(shiftMins(shift)):'—'}</td><td>${shift?badge(shift.status,shift.status==='draft'?'draft':''):'—'}</td><td class="actions no-print">${shift?`<button class="text-btn" data-action="edit-shift" data-id="${shift.id}">Edit</button> ${index===daily.length-1?`<button class="text-btn" data-action="new-shift" data-date="${date}" data-store="${store.id}">＋ Add another</button>`:''}`:`<button class="text-btn" data-action="new-shift" data-date="${date}" data-store="${store.id}">＋ Add shift</button>`}</td></tr>`).join('');
+      const offNames=weekTimeOff(date,date).filter(t=>state.data.employee_stores.some(x=>x.employee_id===t.employee_id&&x.store_id===store.id)).map(t=>getEmployee(t.employee_id)?.name).filter(Boolean);
+      return (daily.length?daily:[null]).map((shift,index)=>`<tr><td><strong>${index===0?day:''}</strong><small>${index===0?shortDate(date):''}</small>${index===0&&offNames.length?`<small class="off-note">Off: ${esc(offNames.join(', '))}</small>`:''}</td><td>${shift?`<button class="name-btn" data-action="edit-shift" data-id="${shift.id}">${esc(getEmployee(shift.employee_id)?.name||'Unknown employee')}</button>`:`<button class="text-btn" data-action="new-shift" data-date="${date}" data-store="${store.id}">＋ Add shift</button>`}</td><td>${shift?shiftLabel(shift):'—'}</td><td>${shift?hours(shiftMins(shift)):'—'}</td><td>${shift?badge(shift.status,shift.status==='draft'?'draft':''):'—'}</td><td class="actions no-print">${shift?`<button class="text-btn" data-action="edit-shift" data-id="${shift.id}">Edit</button> ${index===daily.length-1?`<button class="text-btn" data-action="new-shift" data-date="${date}" data-store="${store.id}">＋ Add another</button>`:''}`:`<button class="text-btn" data-action="new-shift" data-date="${date}" data-store="${store.id}">＋ Add shift</button>`}</td></tr>`).join('');
     }).join('');
     return `<section class="card staffweek-table"><div class="staffweek-table-header"><h3>${esc(store.name)}</h3><span>${shifts.length} shifts · ${hours(shifts.reduce((sum,s)=>sum+shiftMins(s),0))} paid hours</span></div><div class="table-card"><table class="data-table"><thead><tr><th>Day / date</th><th>Employee</th><th>Shift</th><th>Hours</th><th>Status</th><th class="no-print">Change</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
   }).join('')||empty('No stores available','Create a store to start planning the weekly schedule.','new-store','Add store');
+}
+function weekTimeOff(first,last) {
+  return (state.data.time_off||[]).filter(t=>t.status==='approved'&&t.start_date<=last&&t.end_date>=first);
+}
+function renderHoursPanel() {
+  const first=localDay(monday(state.cursor)),last=localDay(addDays(monday(state.cursor),6));
+  const shifts=state.data.shifts.filter(s=>s.shift_date>=first&&s.shift_date<=last);
+  const inStore=e=>state.store==='all'||state.data.employee_stores.some(x=>x.employee_id===e.id&&x.store_id===Number(state.store));
+  const people=state.data.employees.filter(e=>(e.active&&inStore(e))||shifts.some(s=>s.employee_id===e.id&&(state.store==='all'||s.store_id===Number(state.store))));
+  if(!people.length)return '';
+  const rate=(emp,store)=>{const x=state.data.employee_stores.find(r=>r.employee_id===emp.id&&r.store_id===store);return x?.rate_cents??emp.rate_cents??0;};
+  const off=weekTimeOff(first,last);
+  const rows=people.map(e=>{const mine=shifts.filter(s=>s.employee_id===e.id),mins=mine.reduce((n,s)=>n+shiftMins(s),0);
+    return {e,mine,mins,pay:mine.reduce((n,s)=>n+shiftMins(s)*rate(e,s.store_id)/60,0),days:new Set(mine.map(s=>s.shift_date)).size,off:off.filter(t=>t.employee_id===e.id)};}).sort((a,b)=>b.mins-a.mins||a.e.name.localeCompare(b.e.name));
+  const total=rows.reduce((n,r)=>n+r.mins,0),totalPay=rows.reduce((n,r)=>n+r.pay,0);
+  return `<section class="card hours-panel"><div class="card-header"><div><h3>Estimated hours this week</h3><p>${fmtMonthDay(parseDay(first))} – ${fmtMonthDay(parseDay(last))} · drafts and published shifts · hours count every store</p></div><strong class="hours-total">${hours(total)} h · ${money(Math.round(totalPay))}</strong></div>
+  <div class="hours-list">${rows.map(r=>`<div class="hours-row"><div class="table-person">${avatar(r.e)}<div><strong>${esc(r.e.name)}</strong><small>${r.mine.length} shift${r.mine.length===1?'':'s'} · ${r.days} of ${Number(r.e.max_days||5)} days${r.off.length?' · has time off':''}</small></div></div><div class="hours-figs"><strong>${hours(r.mins)} h</strong><small>${money(Math.round(r.pay))}</small></div></div>`).join('')}</div></section>`;
 }
 function renderSchedule() {
   const range=getRange();const count=visibleShifts().filter(s=>s.shift_date>=localDay(range.first)&&s.shift_date<=localDay(range.last)).length;
@@ -140,7 +173,7 @@ function renderSchedule() {
   return heading('STAFFWEEK SCHEDULER','Schedule','A dated weekly schedule for each store. Auto-generate a week, then make any changes you need.',`<button class="btn secondary no-print" data-action="print-schedule">Print / Save PDF</button><button class="btn no-print" data-action="bulk">↻ Repeating shifts</button><button class="btn no-print" data-action="new-shift">＋ Add shift</button>`)+
   `<div class="filter-strip"><span class="filter-label">SCHEDULE STORE</span>${commonStoreSelector()}<span class="tab-note">${esc(help)}</span><div class="spacer"></div>${setupActions}</div>
   <div class="stats-grid">${statistic('Week of',shortDate(week),'Monday–Sunday','▦')}${statistic('Scheduled shifts',estimate?.shift_count??'—',`${estimate?.draft_count??0} drafts this week`,'♙')}${statistic('Scheduled hours',estimate?hours(estimate.planned_minutes):'—','Planned paid hours, less unpaid breaks','◷','blue')}${statistic('Estimated weekly wages',estimate?money(estimate.estimated_base_cents):'—','Straight-time wages only; excludes overtime, taxes & extras','＄','purple')}</div>
-  ${estimate?.unfilled_slots>0?`<div class="manager-permissions"><strong>${estimate.unfilled_slots} staffing slots not scheduled.</strong> Generate the week to fill openings based on the store template and available employees. Shift changes are never overwritten.</div>`:''}`+
+  ${estimate?.unfilled_slots>0?`<div class="manager-permissions"><strong>${estimate.unfilled_slots} staffing slots not scheduled.</strong> Generate the week to fill openings based on the store template and available employees. Shift changes are never overwritten.</div>`:''}`+renderHoursPanel()+
   `<section class="card calendar-card no-print"><div class="calendar-toolbar"><div class="toolbar-group"><div class="calendar-month-title">${state.scheduleLayout==='table'?esc(`${fmtMonthDay(monday(state.cursor))} – ${fmtMonthDay(addDays(monday(state.cursor),6))}, ${addDays(monday(state.cursor),6).getFullYear()}`):esc(range.label)}</div><div class="calendar-nav"><button class="icon-btn" data-action="prev" title="Previous">‹</button><button class="icon-btn" data-action="today" title="Today">◎</button><button class="icon-btn" data-action="next" title="Next">›</button></div><input id="week-jump" type="date" value="${localDay(monday(state.cursor))}" aria-label="Jump to any week" title="Jump to any week"></div><div class="toolbar-group"><div class="segmented"><button data-action="view-table" class="${state.scheduleLayout==='table'?'active':''}">Weekly table</button><button data-action="view-calendar" class="${state.scheduleLayout==='calendar'?'active':''}">Calendar</button></div></div>${state.scheduleLayout==='calendar'?`<div class="segmented"><button data-action="calendar-week" class="${state.mode==='week'?'active':''}">Week</button><button data-action="calendar-month" class="${state.mode==='month'?'active':''}">Month</button></div>`:''}</div></section>
   <div id="schedule-print-content">${state.scheduleLayout==='table'?renderWeekTable():`<section class="card calendar-card">${renderCalendar()}<div class="calendar-footer"><div class="legend"><span><i></i> Published</span><span><i class="draft"></i> Draft</span></div><span>${count} shift${count===1?'':'s'} in this view</span></div></section>`}</div>
   <div class="filter-strip" style="margin-top:15px"><span class="tab-note">Estimate is based on scheduled shifts at current store rates. Actual payroll includes separately logged shopping, pulling, and other paid tasks.</span><div class="spacer"></div><button class="btn" data-action="publish-range">✓ Publish visible dates</button></div>`;
@@ -149,18 +182,76 @@ function renderEmployees() {
   const employees=state.data.employees.filter(e=>state.store==='all'||state.data.employee_stores.some(es=>es.employee_id===e.id&&es.store_id===Number(state.store)));
   const addBtn='<button class="btn primary" data-action="new-employee">＋ Add employee</button>';
   return heading('THE PEOPLE BEHIND THE WORK','Employees','Manage your team, store assignments and hourly pay rates.',`${commonStoreSelector()}${addBtn}`)+
-  `<div class="card table-card">${employees.length?`<table class="data-table"><thead><tr><th>Employee</th><th>Assigned stores</th><th>Hourly rate by store</th><th>Max days / week</th><th>Status</th><th></th></tr></thead><tbody>${employees.map(e=>{const assoc=state.data.employee_stores.filter(x=>x.employee_id===e.id);return `<tr><td><div class="table-person">${avatar(e)}<div><strong>${esc(e.name)}</strong><small>${esc(e.role||'Team member')}</small></div></div></td><td>${esc(assoc.map(x=>getStore(x.store_id)?.name).filter(Boolean).join(' · '))}</td><td>${assoc.map(x=>`<div style="margin:3px 0;white-space:nowrap"><strong class="currency">${money(x.rate_cents??e.rate_cents)}/hr</strong><span class="inline-detail"> · ${esc(getStore(x.store_id)?.name||'')}</span> <button class="text-btn" data-action="edit-rate" data-employee="${e.id}" data-store="${x.store_id}">Edit rate</button></div>`).join('')}</td><td>${Number(e.max_days||5)}</td><td>${badge(e.active?'Active':'Inactive',e.active?'':'gray')}</td><td class="actions"><button class="text-btn" data-action="edit-employee" data-id="${e.id}">Edit →</button></td></tr>`}).join('')}</tbody></table>`:empty('No employees yet','Add team members, then assign them to one or more stores.','new-employee', 'Add employee')}</div>`;
+  `<div class="card table-card">${employees.length?`<table class="data-table"><thead><tr><th>Employee</th><th>Assigned stores</th><th>Hourly rate by store</th><th>Max days / week</th><th>Employee login</th><th>Status</th><th></th></tr></thead><tbody>${employees.map(e=>{const assoc=state.data.employee_stores.filter(x=>x.employee_id===e.id);return `<tr><td><div class="table-person">${avatar(e)}<div><strong>${esc(e.name)}</strong><small>${esc(e.role||'Team member')}</small></div></div></td><td>${esc(assoc.map(x=>getStore(x.store_id)?.name).filter(Boolean).join(' · '))}</td><td>${assoc.map(x=>`<div style="margin:3px 0;white-space:nowrap"><strong class="currency">${money(x.rate_cents??e.rate_cents)}/hr</strong><span class="inline-detail"> · ${esc(getStore(x.store_id)?.name||'')}</span> <button class="text-btn" data-action="edit-rate" data-employee="${e.id}" data-store="${x.store_id}">Edit rate</button></div>`).join('')}</td><td>${Number(e.max_days||5)}</td><td>${(()=>{const l=loginFor(e.id);return l?`${badge(l.username,l.active?'':'gray')} <button class="text-btn" data-action="employee-login" data-id="${e.id}">Edit</button>`:`<button class="text-btn" data-action="employee-login" data-id="${e.id}">＋ Set up login</button>`;})()}</td><td>${badge(e.active?'Active':'Inactive',e.active?'':'gray')}</td><td class="actions"><button class="text-btn" data-action="edit-employee" data-id="${e.id}">Edit →</button></td></tr>`}).join('')}</tbody></table>`:empty('No employees yet','Add team members, then assign them to one or more stores.','new-employee', 'Add employee')}</div>`;
 }
+function loginFor(id){return (state.data.employee_logins||[]).find(l=>l.employee_id===id);}
 function availableDays(employee) {
   try {const days=JSON.parse(employee.availability_json);return Array.isArray(days)&&days.length===7?days:[1,1,1,1,1,1,1];}
   catch{return [1,1,1,1,1,1,1];}
 }
+function availableHours(employee) {
+  try {const h=JSON.parse(employee.availability_hours_json||'null');return Array.isArray(h)&&h.length===7?h:[null,null,null,null,null,null,null];}
+  catch{return [null,null,null,null,null,null,null];}
+}
+function availabilitySummary(employee) {
+  const days=availableDays(employee),hrs=availableHours(employee);
+  const parts=DAY_NAMES.map((d,i)=>!days[i]?null:`${d.slice(0,3)}${hrs[i]?` ${time12(hrs[i][0])}–${time12(hrs[i][1])}`:''}`).filter(Boolean);
+  return parts.length===7&&!hrs.some(Boolean)?'Any time, every day':parts.length?parts.join(' · '):'Not available';
+}
+function availabilityRow(e,i,on,win) {
+  return `<div class="avail-row ${on?'':'off'}" data-day="${i}"><label class="avail-day"><input type="checkbox" name="day_${i}" ${on?'checked':''}><span>${DAY_NAMES[i]}</span></label>
+    <select name="mode_${i}" aria-label="${DAY_NAMES[i]} hours"><option value="any" ${win?'':'selected'}>Any time</option><option value="window" ${win?'selected':''}>Only between…</option></select>
+    <span class="avail-times ${win?'':'hidden'}"><input type="time" name="start_${i}" value="${win?.[0]||'06:00'}" aria-label="${DAY_NAMES[i]} from"><span>to</span><input type="time" name="end_${i}" value="${win?.[1]||'14:00'}" aria-label="${DAY_NAMES[i]} until"></span>
+    <span class="avail-off-label">Can't work</span></div>`;
+}
+function storeBlocks(store) {
+  try {const b=JSON.parse(store.shift_templates_json||'null');return Array.isArray(b)?b:[];}catch{return [];}
+}
+function lockGrid(e) {
+  const stores=allStores().filter(st=>st.active&&(state.store==='all'||st.id===Number(state.store))&&state.data.employee_stores.some(x=>x.employee_id===e.id&&x.store_id===st.id));
+  if(!stores.length)return '';
+  const locks=(state.data.shift_locks||[]).filter(l=>l.employee_id===e.id);
+  return `<div class="lock-section"><div class="lock-title"><strong>Locked shifts</strong><span>Always give ${esc(e.name.split(/\s+/)[0])} these shifts. Generate week places them first, every week.</span></div>${stores.map(st=>{const blocks=storeBlocks(st);
+    if(!blocks.length)return `<p class="tab-note">${esc(st.name)}: set up shifts under <strong>Staffing setup</strong> to lock them.</p>`;
+    return `<div class="lock-store" data-store="${st.id}"><div class="lock-store-name" style="border-left-color:${esc(st.color)}">${esc(st.name)}</div><div class="lock-table" style="grid-template-columns:minmax(52px,auto) repeat(${blocks.length},minmax(0,1fr))"><span></span>${blocks.map(b=>`<span class="lock-head">${esc(b.name)}<small>${time12(b.start_time)}–${time12(b.end_time)}</small></span>`).join('')}
+      ${DAY_NAMES.map((d,i)=>`<span class="lock-day">${d.slice(0,3)}</span>${blocks.map(b=>{const on=locks.some(l=>l.store_id===st.id&&l.weekday===i&&l.template_key===b.id);const needed=Number(b.staffing?.[i]||0);return `<button type="button" class="lock-btn ${on?'on':''}" data-action="toggle-lock" data-weekday="${i}" data-key="${esc(b.id)}" aria-pressed="${on}" ${!needed&&!on?'disabled title="Not staffed this day"':''}>${on?'🔒 Locked':needed?'Lock':'—'}</button>`;}).join('')}`).join('')}</div></div>`;}).join('')}</div>`;
+}
 function renderAvailability() {
   const people=state.data.employees.filter(e=>e.active&&(state.store==='all'||state.data.employee_stores.some(es=>es.employee_id===e.id&&es.store_id===Number(state.store))));
-  const days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-  return heading('STAFFWEEK AVAILABILITY','Weekly availability','Select the weekdays each employee can work. Auto-scheduling and manual shifts respect these settings.',commonStoreSelector())+
-    `<div class="staffweek-hint">Availability is shared across all stores assigned to an employee. The maximum number of workdays per week is configured under Employees.</div>
-    ${people.length?people.map(e=>`<section class="card availability-panel"><div class="availability-heading">${avatar(e)}<div><h3>${esc(e.name)}</h3><p>${esc(e.role||'Team member')} · Up to ${Number(e.max_days||5)} days per week</p></div></div><div class="availability-week">${days.map((day,i)=>`<label><input name="available_day" type="checkbox" data-employee="${e.id}" data-weekday="${i}" ${availableDays(e)[i]?'checked':''}><span>${day}</span></label>`).join('')}</div></section>`).join(''):empty('No employees assigned','Create an employee and assign them to this store to set availability.','new-employee','Add employee')}`;
+  return heading('STAFFWEEK AVAILABILITY','Weekly availability','Set when each person can work, every week, until you change it. Manual shifts and Generate week both follow these rules.',commonStoreSelector())+
+    `<div class="staffweek-hint">Untick a day they can never work. Choose <strong>Only between…</strong> for limits like mornings only. Overnight windows are fine: 2 PM to 2 AM means into the next morning. One-off days off go under <strong>Time off</strong>.</div>
+    ${people.length?people.map(e=>{const days=availableDays(e),hrs=availableHours(e);return `<section class="card availability-panel"><form class="availability-form" data-employee="${e.id}"><div class="availability-heading">${avatar(e)}<div class="grow"><h3>${esc(e.name)}</h3><p>${esc(availabilitySummary(e))} · up to ${Number(e.max_days||5)} days/week</p></div></div>
+      <div class="avail-presets"><span class="filter-label">QUICK SET</span>${Object.entries(AVAIL_PRESETS).map(([k,v])=>`<button type="button" class="btn small" data-action="avail-preset" data-preset="${k}">${esc(v.label)}</button>`).join('')}</div>
+      <div class="avail-grid">${DAY_NAMES.map((_,i)=>availabilityRow(e,i,days[i],hrs[i])).join('')}</div>${lockGrid(e)}
+      <div class="avail-save"><button class="btn primary" type="submit">Save availability</button></div></form></section>`;}).join(''):empty('No employees assigned','Create an employee and assign them to this store to set availability.','new-employee','Add employee')}`;
+}
+async function saveAvailability(form) {
+  const employee=Number(form.dataset.employee),weekdays=[],hours=[];
+  for(let i=0;i<7;i++){
+    const f=n=>form.elements[`${n}_${i}`];
+    if(f('day').checked)weekdays.push(i);
+    hours.push(f('day').checked&&f('mode').value==='window'?{start_time:f('start').value,end_time:f('end').value}:null);
+  }
+  await api('/api/availability',{employee_id:employee,weekdays,hours});
+  for(const sec of form.querySelectorAll('.lock-store')){
+    const locks=[...sec.querySelectorAll('.lock-btn.on')].map(b=>({weekday:Number(b.dataset.weekday),template_key:b.dataset.key}));
+    await api('/api/shift-locks',{employee_id:employee,store_id:Number(sec.dataset.store),locks});
+  }
+  await refresh();toast(`${getEmployee(employee)?.name||'Employee'}'s availability saved`);
+}
+function applyPreset(form,key) {
+  const p=AVAIL_PRESETS[key];
+  for(let i=0;i<7;i++){
+    const f=n=>form.elements[`${n}_${i}`];
+    f('day').checked=!!p.days[i];f('mode').value=p.hours?'window':'any';
+    if(p.hours){f('start').value=p.hours[0];f('end').value=p.hours[1];}
+    syncAvailRow(form.querySelector(`.avail-row[data-day="${i}"]`));
+  }
+  toast(`${p.label} applied. Adjust if needed, then Save.`);
+}
+function syncAvailRow(row) {
+  const on=row.querySelector('input[type=checkbox]').checked,win=row.querySelector('select').value==='window';
+  row.classList.toggle('off',!on);row.querySelector('.avail-times').classList.toggle('hidden',!win);
 }
 function renderTime() {
   const entries=visibleEntries().slice().sort((a,b)=>b.entry_date.localeCompare(a.entry_date)||b.id-a.id);
@@ -168,6 +259,42 @@ function renderTime() {
   return heading('EVERY HOUR COUNTS','Time & tasks','Record hours actually worked—scheduled shifts, shopping, pulling orders and more.',`<button class="btn primary" data-action="new-entry">＋ Log hours</button>`)+
   `<div class="stats-grid">${statistic('Recorded entries',entries.length,'All dates in the selected stores','▤')}${statistic('Total recorded hours',hours(sum),'Includes all paid work categories','◷','blue')}${statistic('Extra task hours',hours(entries.filter(e=>e.category!=='Shift').reduce((n,e)=>n+e.minutes,0)),'Shopping, pulling, deliveries & more','↗','orange')}${statistic('Employees with hours',new Set(entries.map(e=>e.employee_id)).size,'Unique employees','♙','purple')}</div><div class="filter-strip"><span class="filter-label">LOCATION</span>${commonStoreSelector()}<div class="spacer"></div><span class="small-text muted">Payroll uses actual recorded time, never just planned shifts.</span></div>
   <div class="card table-card">${entries.length?`<table class="data-table"><thead><tr><th>Employee</th><th>Date / store</th><th>Work type</th><th>Time / duration</th><th>Hours</th><th></th></tr></thead><tbody>${entries.map(e=>`<tr><td><div class="table-person">${avatar(getEmployee(e.employee_id))}<div><strong>${esc(getEmployee(e.employee_id)?.name||'Unknown')}</strong><small>${esc(getEmployee(e.employee_id)?.role||'')}</small></div></div></td><td><strong>${shortDate(e.entry_date)}</strong><small>${esc(getStore(e.store_id)?.name||'')}</small></td><td>${badge(e.category,e.category==='Shift'?'':'orange')}${e.notes?`<small>${esc(e.notes)}</small>`:''}</td><td>${e.start_time?`${time12(e.start_time)}–${time12(e.end_time)}${e.break_minutes?`<small>${e.break_minutes}m unpaid break</small>`:''}`:'Manual hours'}</td><td><strong>${hours(e.minutes)}</strong></td><td class="actions"><button class="text-btn" data-action="edit-entry" data-id="${e.id}">Edit →</button></td></tr>`).join('')}</tbody></table>`:empty('No time entries yet','Log worked shifts or paid tasks like shopping and pulling orders.','new-entry','Log hours')}</div>`;
+}
+function timeOffWhen(t) {
+  const range=t.start_date===t.end_date?shortDate(t.start_date):`${shortDate(t.start_date)} – ${shortDate(t.end_date)}`;
+  return t.start_time?`${range}, ${time12(t.start_time)}–${time12(t.end_time)}`:`${range}${t.start_date===t.end_date?'':` (${Math.round((parseDay(t.end_date)-parseDay(t.start_date))/86400000)+1} days)`}, all day`;
+}
+const timeOffBadge=t=>badge(t.status[0].toUpperCase()+t.status.slice(1),{pending:'orange',approved:'',denied:'gray',cancelled:'gray'}[t.status]);
+function renderTimeOff() {
+  const filter=state.timeoffFilter||'pending';
+  const visibleIds=new Set(state.data.employees.filter(e=>state.store==='all'||state.data.employee_stores.some(x=>x.employee_id===e.id&&x.store_id===Number(state.store))).map(e=>e.id));
+  const all=(state.data.time_off||[]).filter(t=>visibleIds.has(t.employee_id));
+  const list=all.filter(t=>filter==='all'||(filter==='upcoming'?t.status==='approved'&&t.end_date>=localDay(new Date()):t.status===filter));
+  const counts={pending:all.filter(t=>t.status==='pending').length};
+  const conflicts=t=>state.data.shifts.filter(s=>s.employee_id===t.employee_id&&s.shift_date>=t.start_date&&s.shift_date<=t.end_date&&(!t.start_time||(()=>{const a=timeMinute(s.start_time),b=a+((timeMinute(s.end_time)-a+1440)%1440||1440),c=timeMinute(t.start_time),d=c+((timeMinute(t.end_time)-c+1440)%1440||1440);return a<d&&c<b;})())).length;
+  return heading('REQUESTS & DAYS OFF','Time off','Approve or deny requests from employee logins, or record time off yourself. Approved time off blocks scheduling.',`${commonStoreSelector()}<button class="btn primary" data-action="new-timeoff">＋ Record time off</button>`)+
+  `<div class="segmented timeoff-tabs">${[['pending',`Pending${counts.pending?` (${counts.pending})`:''}`],['upcoming','Upcoming approved'],['all','All']].map(([k,l])=>`<button data-action="timeoff-filter" data-filter="${k}" class="${filter===k?'active':''}">${l}</button>`).join('')}</div>
+  <div class="card list-card">${list.length?list.map(t=>{const e=getEmployee(t.employee_id);return `<div class="list-row">${avatar(e)}<div class="grow"><strong>${esc(e?.name||'Employee')}</strong><small>${esc(timeOffWhen(t))}</small>${t.reason?`<small class="reason">“${esc(t.reason)}”</small>`:''}${['pending','approved'].includes(t.status)&&conflicts(t)?`<small class="off-note">⚠ Already scheduled for ${conflicts(t)} shift${conflicts(t)===1?'':'s'} in this time. Edit the schedule after approving.</small>`:''}<small>${t.status==='pending'?`Requested by ${esc(t.requested_by)}`:t.reviewed_by?`${esc(t.status)} by ${esc(t.reviewed_by)}`:''}</small></div><div class="row-actions">${timeOffBadge(t)}${t.status==='pending'?`<button class="btn small primary" data-action="timeoff-approve" data-id="${t.id}">Approve</button><button class="btn small danger" data-action="timeoff-deny" data-id="${t.id}">Deny</button>`:''}${t.status==='approved'?`<button class="text-btn red" data-action="timeoff-cancel" data-id="${t.id}">Cancel</button>`:''}</div></div>`;}).join(''):empty(filter==='pending'?'No pending requests':'Nothing here yet',filter==='pending'?'Requests from employee logins show up here for approval.':'Recorded and approved time off will show here.')}</div>`;
+}
+function renderMySchedule() {
+  const me=state.me;if(!me)return '';
+  const first=parseDay(me.week_start),mine=me.shifts.filter(s=>s.employee_id===me.employee.id);
+  const total=mine.reduce((n,s)=>n+shiftMins(s),0);
+  const offThisWeek=me.time_off.filter(t=>t.status==='approved'&&t.start_date<=me.week_end&&t.end_date>=me.week_start);
+  const storeName=id=>me.stores.find(s=>s.id===id)?.name||'';
+  const days=DAY_NAMES.map((d,i)=>{const iso=localDay(addDays(first,i)),shifts=me.shifts.filter(s=>s.shift_date===iso),own=shifts.filter(s=>s.employee_id===me.employee.id);
+    const off=offThisWeek.filter(t=>t.start_date<=iso&&t.end_date>=iso);
+    return `<section class="card my-day ${iso===localDay(new Date())?'today':''}"><div class="my-day-head"><div><strong>${d}</strong><small>${shortDate(iso)}</small></div>${own.length?own.map(s=>`<span class="my-shift-chip">${shiftLabel(s)}</span>`).join(''):off.length?badge('Time off','orange'):'<span class="muted small-text">Off</span>'}</div>
+      ${shifts.length?`<div class="team-list">${shifts.map(s=>`<div class="team-line ${s.employee_id===me.employee.id?'mine':''}"><span>${esc(s.employee_id===me.employee.id?'You':s.employee_name)}</span><span>${shiftLabel(s)}${me.stores.length>1?` · ${esc(storeName(s.store_id))}`:''}</span></div>`).join('')}</div>`:''}</section>`;}).join('');
+  return heading('YOUR WEEK',`Hi, ${me.employee.name.split(/\s+/)[0]}`,'Your published schedule and who you are working with.',`<button class="btn primary" data-action="new-timeoff">Request time off</button>`)+
+  `<section class="card week-switch"><button class="icon-btn" data-action="prev" title="Previous week">‹</button><div><strong>${fmtMonthDay(first)} – ${fmtMonthDay(addDays(first,6))}</strong><small>${mine.length} shift${mine.length===1?'':'s'} · ${hours(total)} hours</small></div><button class="icon-btn" data-action="next" title="Next week">›</button></section>
+  <div class="my-week">${days}</div>
+  <p class="tab-note">Only published shifts appear here. Your availability: ${esc(availabilitySummary(me.employee))}. Ask your manager to change it.</p>`;
+}
+function renderMyTimeOff() {
+  const me=state.me;if(!me)return '';
+  return heading('TIME OFF','My time off','Request days or hours off. Your manager approves or denies each request.',`<button class="btn primary" data-action="new-timeoff">＋ Request time off</button>`)+
+  `<div class="card list-card">${me.time_off.length?me.time_off.map(t=>`<div class="list-row"><div class="grow"><strong>${esc(timeOffWhen(t))}</strong>${t.reason?`<small class="reason">“${esc(t.reason)}”</small>`:''}${t.review_note?`<small>Manager note: ${esc(t.review_note)}</small>`:''}</div><div class="row-actions">${timeOffBadge(t)}${t.status==='pending'?`<button class="text-btn red" data-action="timeoff-cancel" data-id="${t.id}">Cancel</button>`:''}</div></div>`).join(''):empty('No requests yet','Tap Request time off to ask for a day or a few hours off.','new-timeoff','Request time off')}</div>`;
 }
 function renderPayroll() {
   if(!isOwner()) return empty('Owner only','Payroll estimates are restricted to the owner.');
@@ -301,6 +428,20 @@ function showManager(u) {
   if(!ensureActiveStore())return;
   openModal(u?'Edit manager':'Create manager login',`<form id="manager-form"><input type="hidden" name="id" value="${u?.id||''}">${input('username','Login username',u?.username||'','text','required autocomplete="username" maxlength="80" pattern="[a-zA-Z0-9_\\-]+" title="Letters, numbers, hyphens and underscores only"')}${input('password',u?'New password (leave blank to keep current)':'Initial password','', 'password',`${u?'':'required'} autocomplete="new-password"`)}<label>Stores this manager can access (select at least one)</label>${storeChecks(ids)}${u?`<div class="form-checkbox"><input type="checkbox" id="manager-active" name="active" ${u.active?'checked':''}><label for="manager-active">Account enabled</label></div>`:''}<p class="tab-note">Give the manager this username and password to sign in on the normal login page. Managers can add stores and employees and manage schedules, hours and rates for their stores; payroll and login accounts stay owner-only.</p>${footer(u?'Save manager':'Create login')}</form>`);
 }
+function showEmployeeLogin(e) {
+  if(!e)return;const l=loginFor(e.id);
+  const suggested=e.name.toLowerCase().replace(/[^a-z0-9]+/g,'.').replace(/^\.|\.$/g,'');
+  openModal(l?'Edit employee login':'Set up employee login',`<form id="employee-login-form"><input type="hidden" name="employee_id" value="${e.id}"><div class="manager-permissions"><strong>${esc(e.name)}</strong> can sign in on the same page to see the published weekly schedule and request time off. They cannot see pay, other pages, or drafts.</div>${input('username','Login username',l?.username||suggested,'text','required autocomplete="off" maxlength="80"')}${input('password',l?'New password (leave blank to keep current)':'Password','','text',`${l?'':'required'} autocomplete="new-password"`)}${l?`<div class="form-checkbox"><input type="checkbox" id="login-active" name="active" ${l.active?'checked':''}><label for="login-active">Login enabled</label></div>`:''}${footer(l?'Save login':'Create login')}</form>`);
+}
+function showTimeOff(employeeId) {
+  if(!isEmployee()&&!state.data.employees.some(e=>e.active))return toast('Add an employee first',true);
+  const today=localDay(new Date());
+  const who=isEmployee()?'':selectField('employee_id','Employee',state.data.employees.filter(e=>e.active).filter(e=>state.store==='all'||state.data.employee_stores.some(x=>x.employee_id===e.id&&x.store_id===Number(state.store))).map(e=>`<option value="${e.id}" ${e.id===employeeId?'selected':''}>${esc(e.name)}</option>`).join(''));
+  openModal(isEmployee()?'Request time off':'Record time off',`<form id="timeoff-form">${who}<div class="two-col"><div>${input('start_date','First day off',today,'date','required')}</div><div>${input('end_date','Last day off',today,'date','required')}</div></div>
+    <div class="form-checkbox"><input type="checkbox" id="partial-day" name="partial"><label for="partial-day">Only part of the day (single date)</label></div>
+    <div id="partial-times" class="two-col hidden"><div>${input('start_time','Off from','09:00','time')}</div><div>${input('end_time','Until','13:00','time')}</div></div>
+    ${textArea('reason','Reason (optional)')}<p class="helper">${isEmployee()?'Your manager will approve or deny this. You can cancel it while it is still pending.':'Time off you record here is approved immediately and blocks scheduling on those dates.'}</p>${footer(isEmployee()?'Send request':'Save time off')}</form>`);
+}
 function showChangePassword() {
   openModal('Change my password',`<form id="password-form">${input('current_password','Current password','','password','required autocomplete="current-password"')}${input('new_password','New password','','password','required autocomplete="new-password"')}${footer('Change password')}</form>`);
 }
@@ -316,6 +457,7 @@ async function loadAccounts() {state.accounts=await api('/api/users');}
 async function loadPayroll() {const q=new URLSearchParams({start:state.payrollStart,end:state.payrollEnd});if(state.payrollStore!=='all')q.set('store_id',state.payrollStore);state.payroll=await api('/api/payroll?'+q);}
 async function setView(view) {
   if ((view==='payroll'||view==='managers')&&!isOwner())return;
+  if (isEmployee()!==view.startsWith('my-'))return;
   state.view=view;
   try {if(view==='payroll')await loadPayroll();if(view==='managers')await loadAccounts();if(view==='schedule')await loadEstimate();render();}
   catch(e){toast(e.message,true);render();}
@@ -323,6 +465,8 @@ async function setView(view) {
 async function handleAction(action,btn) {
   const id=Number(btn.dataset.id);
   if(action==='close-modal')return closeModal();
+  if(action==='avail-preset')return applyPreset(btn.closest('form'),btn.dataset.preset);
+  if(action==='toggle-lock'){const on=!btn.classList.contains('on');btn.classList.toggle('on',on);btn.setAttribute('aria-pressed',on);btn.textContent=on?'🔒 Locked':'Lock';return toast('Click Save to keep this change');}
   if(action==='add-staffing-block'){
     const target=$('#staffing-blocks');
     if(!target)return;
@@ -357,6 +501,16 @@ async function handleAction(action,btn) {
     return;
   }
   if(action==='new-entry')return showEntry();
+  if(action==='employee-login')return showEmployeeLogin(getEmployee(id));
+  if(action==='new-timeoff')return showTimeOff(Number(btn.dataset.employee)||undefined);
+  if(action==='timeoff-approve'||action==='timeoff-deny'){
+    await api('/api/time-off/review',{id,status:action==='timeoff-approve'?'approved':'denied'});await refresh();toast(action==='timeoff-approve'?'Time off approved':'Request denied');return;
+  }
+  if(action==='timeoff-cancel'){
+    if(!confirm('Cancel this time off?'))return;
+    await api('/api/time-off/cancel',{id});await refresh();toast('Time off cancelled');return;
+  }
+  if(action==='timeoff-filter'){state.timeoffFilter=btn.dataset.filter;return render();}
   if(action==='edit-entry')return showEntry(state.data.entries.find(x=>x.id===id));
   if(action==='new-manager')return showManager();
   if(action==='edit-manager')return showManager(state.accounts?.users.find(x=>x.id===id));
@@ -426,6 +580,13 @@ async function submitModal(form) {
     endpoint='/api/entries';const mode=v('mode');body={id:v('id')||undefined,employee_id:Number(v('employee_id')),store_id:Number(v('store_id')),date:v('date'),category:v('category'),notes:v('notes'),hours:mode==='manual'?v('hours'):undefined,start_time:mode==='times'?v('start_time'):undefined,end_time:mode==='times'?v('end_time'):undefined,break_minutes:mode==='times'?Number(v('break_minutes')):0};if(isOwner()&&v('rate'))body.rate=v('rate');ok='Worked hours saved';
   } else if(kind==='manager-form'){
     endpoint='/api/users';body={id:v('id')||undefined,username:v('username'),password:v('password'),store_ids:values.getAll('store_ids').map(Number),active:form.elements.active?values.has('active'):true};ok='Manager account saved';
+  } else if(kind==='employee-login-form'){
+    endpoint='/api/employee-login';body={employee_id:Number(v('employee_id')),username:v('username'),password:v('password'),active:form.elements.active?values.has('active'):true};ok='Employee login saved';
+  } else if(kind==='timeoff-form'){
+    const partial=values.has('partial');
+    endpoint='/api/time-off';body={start_date:v('start_date'),end_date:partial?v('start_date'):v('end_date'),start_time:partial?v('start_time'):undefined,end_time:partial?v('end_time'):undefined,reason:v('reason')};
+    if(!isEmployee())body.employee_id=Number(v('employee_id'));
+    ok=isEmployee()?'Request sent to your manager':'Time off saved';
   } else if(kind==='password-form'){
     endpoint='/api/change-password';body={current_password:v('current_password'),new_password:v('new_password')};ok='Password changed. Please sign in again.';
   } else return;
@@ -444,7 +605,8 @@ document.addEventListener('submit',async event=>{
   event.preventDefault();const form=event.target;const formId=form.getAttribute('id');const submit=form.querySelector('button[type=submit]');
   if(submit)submit.disabled=true;
   try {
-    if(formId==='login-form'){
+    if(form.classList.contains('availability-form')){await saveAvailability(form);}
+    else if(formId==='login-form'){
       $('#login-error').textContent='';
       state.session=await api('/api/login',{username:$('#login-user').value.trim(),password:$('#login-pass').value});
       await loadData();showApp();
@@ -458,16 +620,8 @@ document.addEventListener('change',async event=>{
     if(t.value){state.cursor=parseDay(t.value);try{await loadEstimate();render();}catch(e){toast(e.message,true);}}
     return;
   }
-  if(t.name==='available_day'){
-    const employee=getEmployee(Number(t.dataset.employee));
-    if(!employee)return;
-    const previous=availableDays(employee);
-    const selected=previous.map((yes,i)=>i).filter(i=>i===Number(t.dataset.weekday)?t.checked:Boolean(previous[i]));
-    t.disabled=true;
-    try {await api('/api/availability',{employee_id:employee.id,weekdays:selected});await refresh();toast(`${employee.name}'s availability saved`);}
-    catch(e){t.checked=!t.checked;t.disabled=false;toast(e.message,true);}
-    return;
-  }
+  if(t.closest('.avail-row')){syncAvailRow(t.closest('.avail-row'));return;}
+  if(t.name==='partial'){$('#partial-times').classList.toggle('hidden',!t.checked);const end=$('#f-end_date');if(end)end.closest('div').classList.toggle('hidden',t.checked);return;}
   if(t.id==='global-store'){state.store=t.value;try{await loadEstimate();render();}catch(e){toast(e.message,true);}return;}
   if(t.name==='store_id'&&t.closest('#shift-form,#bulk-form,#entry-form')){
     const employee=t.closest('form').elements.employee_id;

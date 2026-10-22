@@ -179,6 +179,82 @@ class ShiftLedgerTests(unittest.TestCase):
         outsider=self.create_employee([1])
         self.request(manager,'/api/employees',{'id':outsider,'name':'X','rate':'1','store_ids':[store],'active':True},csrf,expect=403)
 
+    def test_availability_hours_windows_block_shifts(self):
+        emp=self.create_employee([1])
+        mornings=[{'start_time':'06:00','end_time':'14:00'}]*7
+        self.request(self.owner,'/api/availability',{'employee_id':emp,'weekdays':[0,1,2,3,4,5,6],'hours':mornings},self.csrf)
+        ok={'employee_id':emp,'store_id':1,'date':'2026-11-02','start_time':'07:00','end_time':'13:00','break_minutes':0}
+        self.request(self.owner,'/api/shifts',ok,self.csrf)
+        late=dict(ok,date='2026-11-03',start_time='12:00',end_time='18:00')
+        err=self.request(self.owner,'/api/shifts',late,self.csrf,expect=400)
+        self.assertIn('only available',err['error'])
+        # Overnight window (evenings 16:00-02:00) accepts a 18:00-01:00 shift.
+        self.request(self.owner,'/api/availability',{'employee_id':emp,'weekdays':[0,1,2,3,4,5,6],
+                     'hours':[{'start_time':'16:00','end_time':'02:00'}]*7},self.csrf)
+        self.request(self.owner,'/api/shifts',dict(ok,date='2026-11-04',start_time='18:00',end_time='01:00'),self.csrf)
+        # Generator respects windows: plan a 09:00-17:00 shift; evening-only employee cannot fill it.
+        self.request(self.owner,'/api/store-staffing',{'store_id':1,'open_time':'09:00','close_time':'17:00',
+                     'slot_minutes':480,'break_minutes':0,'staffing':[1,1,1,1,1,1,1]},self.csrf)
+        result=self.request(self.owner,'/api/schedule/generate-week',{'store_id':1,'week_start':'2026-11-09'},self.csrf)
+        self.assertEqual(result['created'],0)
+
+    def test_employee_login_portal_and_time_off(self):
+        emp=self.create_employee([1])
+        other_store=self.create_store('Other')
+        self.request(self.owner,'/api/employee-login',{'employee_id':emp,'username':'jane','password':'pw'},self.csrf)
+        e=self.client(); csrf=self.login(e,'jane','pw')['csrf']
+        self.assertEqual(self.request(e,'/api/session')['role'],'employee')
+        # Employees are locked out of every staff function.
+        for path,body in [('/api/data',None),('/api/payroll?start=2026-11-02&end=2026-11-08',None),('/api/users',None),
+                          ('/api/stores',{'name':'x'}),('/api/employees',{'name':'x','rate':'1','store_ids':[1]}),
+                          ('/api/shifts',{'employee_id':emp,'store_id':1,'date':'2026-11-02','start_time':'09:00','end_time':'10:00'}),
+                          ('/api/entries',{'employee_id':emp,'store_id':1,'date':'2026-11-02','hours':'5'}),
+                          ('/api/availability',{'employee_id':emp,'weekdays':[0]}),('/api/time-off/review',{'id':1,'status':'approved'}),
+                          ('/api/employee-login',{'employee_id':emp,'username':'jane','password':'p'})]:
+            self.request(e,path,body,csrf if body is not None else None,expect=403)
+        # Portal shows published shifts only.
+        self.request(self.owner,'/api/shifts',{'employee_id':emp,'store_id':1,'date':'2026-11-02','start_time':'09:00',
+                     'end_time':'17:00','break_minutes':0,'status':'published'},self.csrf)
+        self.request(self.owner,'/api/shifts',{'employee_id':emp,'store_id':1,'date':'2026-11-03','start_time':'09:00',
+                     'end_time':'17:00','break_minutes':0,'status':'draft'},self.csrf)
+        me=self.request(e,'/api/me?week_start=2026-11-02')
+        self.assertEqual([x['shift_date'] for x in me['shifts']],['2026-11-02'])
+        self.assertNotIn('rate_cents',me['employee'])
+        # Request, manager approval, and scheduling block.
+        rid=self.request(e,'/api/time-off',{'start_date':'2026-11-05','end_date':'2026-11-06','reason':'Trip'},csrf)['id']
+        self.request(self.owner,'/api/time-off/review',{'id':rid,'status':'approved'},self.csrf)
+        err=self.request(self.owner,'/api/shifts',{'employee_id':emp,'store_id':1,'date':'2026-11-06','start_time':'09:00',
+                     'end_time':'17:00','break_minutes':0},self.csrf,expect=400)
+        self.assertIn('time off',err['error'])
+        # Approved requests cannot be cancelled by the employee; pending ones can.
+        self.request(e,'/api/time-off/cancel',{'id':rid},csrf,expect=400)
+        rid2=self.request(e,'/api/time-off',{'start_date':'2026-11-10','start_time':'09:00','end_time':'12:00'},csrf)['id']
+        self.request(e,'/api/time-off/cancel',{'id':rid2},csrf)
+        # A manager of another store cannot review this employee's requests.
+        self.request(self.owner,'/api/users',{'username':'m2','password':'p','store_ids':[other_store]},self.csrf)
+        m=self.client(); mc=self.login(m,'m2','p')['csrf']
+        rid3=self.request(e,'/api/time-off',{'start_date':'2026-11-20'},csrf)['id']
+        self.request(m,'/api/time-off/review',{'id':rid3,'status':'denied'},mc,expect=403)
+        # Deactivating the employee blocks their login.
+        self.request(self.owner,'/api/employees',{'id':emp,'name':'Test Cashier','rate':'20','store_ids':[1],'active':False},self.csrf)
+        self.request(e,'/api/me?week_start=2026-11-02',expect=401)
+        self.request(self.client(),'/api/login',{'username':'jane','password':'pw'},expect=401)
+
+    def test_locked_shifts_are_placed_first_every_week(self):
+        a=self.create_employee([1]); b=self.create_employee([1])
+        blocks=[{'id':'am','name':'Morning','start_time':'10:00','end_time':'17:00','break_minutes':0,'staffing':[1]*7},
+                {'id':'pm','name':'Evening','start_time':'16:00','end_time':'23:00','break_minutes':0,'staffing':[1]*7}]
+        self.request(self.owner,'/api/store-staffing',{'store_id':1,'open_time':'10:00','close_time':'23:00','slot_minutes':420,
+                     'break_minutes':0,'staffing':[2]*7,'templates':blocks},self.csrf)
+        # Lock employee b to Monday morning; without the lock a (lower id) would get it.
+        self.request(self.owner,'/api/shift-locks',{'employee_id':b,'store_id':1,'locks':[{'weekday':0,'template_key':'am'}]},self.csrf)
+        self.request(self.owner,'/api/shift-locks',{'employee_id':b,'store_id':1,'locks':[{'weekday':0,'template_key':'nope'}]},self.csrf,expect=400)
+        for week in ('2026-11-02','2026-11-09'):
+            self.request(self.owner,'/api/schedule/generate-week',{'store_id':1,'week_start':week},self.csrf)
+            mon=[x for x in self.request(self.owner,'/api/data')['shifts'] if x['shift_date']==week and x['template_key']=='am']
+            self.assertEqual([x['employee_id'] for x in mon],[b])
+        self.assertEqual(len(self.request(self.owner,'/api/data')['shift_locks']),1)
+
     def test_short_passwords_are_allowed(self):
         self.request(self.owner,'/api/users',{'username':'short','password':'1234','store_ids':[1]},self.csrf)
         self.login(self.client(),'short','1234')

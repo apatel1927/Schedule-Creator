@@ -31,7 +31,7 @@ class UnraidDeploymentTests(unittest.TestCase):
         self.assertIn("docker rename shiftledger \"$legacy_name\"", script)
 
     def test_native_scripts_have_valid_posix_shell_syntax(self):
-        for script in ("MIGRATE-UNRAID-NATIVE.sh", "ROLLBACK-UNRAID-NATIVE.sh"):
+        for script in ("MIGRATE-UNRAID-NATIVE.sh", "ROLLBACK-UNRAID-NATIVE.sh", "VERIFY-UNRAID-NATIVE.sh"):
             with self.subTest(script=script):
                 subprocess.run(["sh", "-n", str(ROOT / script)], check=True)
 

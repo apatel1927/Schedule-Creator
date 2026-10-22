@@ -9,12 +9,26 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
 fi
 
 if [ ! -f .env ]; then
-  if [ "$#" -lt 1 ]; then
-    echo 'Pass the path of your PREVIOUS installation containing .env:'
-    echo 'sh UPGRADE-UNRAID.sh /mnt/user/appdata/shiftledger-installer/Schedule-Creator-main'
-    exit 1
+  if [ "$#" -gt 0 ]; then
+    previous=$1
+  else
+    previous=''
+    for candidate in \
+      /mnt/user/appdata/shiftledger-updates/v1.2.0/Schedule-Creator-main \
+      /mnt/user/appdata/shiftledger-installer/Schedule-Creator-main \
+      /mnt/user/appdata/shiftledger-updates/v1.1.0/Schedule-Creator-main; do
+      if [ -f "$candidate/.env" ]; then
+        previous=$candidate
+        break
+      fi
+    done
+    if [ -z "$previous" ]; then
+      echo 'Previous login configuration was not found in the known install folders.'
+      echo 'Run: sh UPGRADE-UNRAID.sh /path/to/previous/Schedule-Creator-main'
+      echo 'Nothing was changed.'
+      exit 1
+    fi
   fi
-  previous=$1
   if [ -f "$previous/.env" ]; then
     source_env=$previous/.env
   elif [ -f "$previous/shiftledger/.env" ]; then

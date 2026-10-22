@@ -224,6 +224,62 @@ class ShiftLedgerTests(unittest.TestCase):
         self.assertEqual(data['shifts'][0]['id'],shift)
         self.assertEqual(data['stores'][0]['open_time'],'08:00')
 
+    def test_staffweek_availability_max_days_overlap_and_manager_updates(self):
+        store2=self.create_store('Second')
+        employee=self.request(self.owner,'/api/employees',{'name':'Availability Tester','role':'Cashier',
+                    'rate':'18.00','max_days':2,'store_ids':[1,store2]},self.csrf)['id']
+        self.request(self.owner,'/api/availability',{'employee_id':employee,'weekdays':[0,1]},self.csrf)
+        em=next(e for e in self.request(self.owner,'/api/data')['employees'] if e['id']==employee)
+        self.assertEqual(em['max_days'],2)
+        self.assertEqual(json.loads(em['availability_json']),[1,1,0,0,0,0,0])
+        base={'employee_id':employee,'store_id':1,'date':'2026-11-02',
+              'start_time':'09:00','end_time':'17:00','break_minutes':30}
+        self.request(self.owner,'/api/shifts',base,self.csrf)
+        self.request(self.owner,'/api/shifts',{**base,'store_id':store2,'start_time':'12:00','end_time':'19:00'},self.csrf,expect=400)
+        self.request(self.owner,'/api/shifts',{**base,'date':'2026-11-03'},self.csrf)
+        self.request(self.owner,'/api/shifts',{**base,'date':'2026-11-04'},self.csrf,expect=400)
+        self.request(self.owner,'/api/availability',{'employee_id':employee,'weekdays':list(range(7))},self.csrf)
+        self.request(self.owner,'/api/shifts',{**base,'date':'2026-11-04'},self.csrf,expect=400)
+
+        self.request(self.owner,'/api/users',{'username':'availability_mgr',
+                     'password':'staffweek-manager-password','store_ids':[1]},self.csrf)
+        mgr=self.client()
+        csrf=self.login(mgr,'availability_mgr','staffweek-manager-password')['csrf']
+        self.request(mgr,'/api/availability',{'employee_id':employee,'weekdays':[0,1,2,3,4]},csrf)
+        self.assertEqual(len(json.loads(next(e for e in self.request(mgr,'/api/data')['employees']
+                                    if e['id']==employee)['availability_json'])),7)
+        outsider=self.create_employee([store2])
+        self.request(mgr,'/api/availability',{'employee_id':outsider,'weekdays':[0]},csrf,expect=403)
+
+    def test_generated_week_respects_unavailable_days(self):
+        emp=self.request(self.owner,'/api/employees',{'name':'Monday Staff','rate':'15.00',
+               'max_days':5,'store_ids':[1]},self.csrf)['id']
+        self.request(self.owner,'/api/availability',{'employee_id':emp,'weekdays':[0]},self.csrf)
+        self.request(self.owner,'/api/store-staffing',{'store_id':1,'open_time':'09:00',
+               'close_time':'17:00','slot_minutes':480,'break_minutes':30,
+               'staffing':[1,1,0,0,0,0,0]},self.csrf)
+        result=self.request(self.owner,'/api/schedule/generate-week',
+                            {'store_id':1,'week_start':'2026-11-02'},self.csrf)
+        self.assertEqual(result['created'],1)
+        self.assertEqual(result['unfilled'],[{'date':'2026-11-03','remaining':1}])
+
+    def test_preavailability_database_schema_is_upgraded_in_place(self):
+        original_file=app.DB_FILE
+        try:
+            app.DB_FILE=app.DATA_DIR/'legacy-schema.sqlite3'
+            with app.db() as con:
+                con.execute('''CREATE TABLE employees(id INTEGER PRIMARY KEY,name TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT '',rate_cents INTEGER NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL)''')
+            app.init_db()
+            with app.db() as con:
+                columns=[r[1] for r in con.execute('PRAGMA table_info(employees)')]
+                self.assertIn('max_days',columns)
+                self.assertIn('availability_json',columns)
+                self.assertEqual(con.execute('SELECT COUNT(*) FROM users').fetchone()[0],1)
+        finally:
+            app.DB_FILE=original_file
+
 
 if __name__ == '__main__':
     unittest.main()

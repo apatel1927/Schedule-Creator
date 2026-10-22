@@ -89,6 +89,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS employees (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '',
             rate_cents INTEGER NOT NULL CHECK(rate_cents >= 0),
+            max_days INTEGER NOT NULL DEFAULT 5, availability_json TEXT NOT NULL DEFAULT '[1,1,1,1,1,1,1]',
             active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS employee_stores (
@@ -130,6 +131,11 @@ def init_db():
         store_columns = [row[1] for row in con.execute("PRAGMA table_info(employee_stores)")]
         if "rate_cents" not in store_columns:
             con.execute("ALTER TABLE employee_stores ADD COLUMN rate_cents INTEGER")
+        employee_columns = [row[1] for row in con.execute("PRAGMA table_info(employees)")]
+        if "max_days" not in employee_columns:
+            con.execute("ALTER TABLE employees ADD COLUMN max_days INTEGER NOT NULL DEFAULT 5")
+        if "availability_json" not in employee_columns:
+            con.execute("ALTER TABLE employees ADD COLUMN availability_json TEXT NOT NULL DEFAULT '[1,1,1,1,1,1,1]'")
         store_columns = [row[1] for row in con.execute("PRAGMA table_info(stores)")]
         for column, ddl in (
             ("open_time", "TEXT NOT NULL DEFAULT '09:00'"),
@@ -256,6 +262,45 @@ def ensure_employee_store(con, employee_id, store_id):
         raise InputError("Employee is not assigned to this store")
 
 
+def availability_payload(value):
+    if not isinstance(value, list) or any(type(w) is not int or w not in range(7) for w in value):
+        raise InputError("Available weekdays must be selected from Monday through Sunday")
+    return json.dumps([int(day in value) for day in range(7)])
+
+
+def can_manage_employee(con, user, employee_id):
+    if user["role"] == "owner":
+        return True
+    return bool(con.execute("SELECT 1 FROM employee_stores WHERE employee_id=? AND store_id IN ("+
+                            ",".join("?" for _ in user["store_ids"])+")",
+                            (employee_id, *user["store_ids"])).fetchone()) if user["store_ids"] else False
+
+
+def validate_employee_shift(con, employee_id, day, start, end, skip_id=None):
+    emp = ensure_record(con, "employees", employee_id, True)
+    weekday = as_date(day).weekday()
+    if not json.loads(emp["availability_json"])[weekday]:
+        raise InputError(f"Employee is unavailable on {as_date(day).strftime('%A')}")
+    previous = rows(con, """SELECT id,shift_date,start_time,end_time FROM shifts
+                   WHERE employee_id=? AND deleted_at IS NULL AND shift_date BETWEEN ? AND ?""",
+                    (employee_id, (week_monday(as_date(day))-timedelta(days=1)).isoformat(),
+                     (week_monday(as_date(day))+timedelta(days=6)).isoformat()))
+    previous = [shift for shift in previous if shift["id"] != skip_id]
+    week_begin = week_monday(as_date(day)).isoformat()
+    days = {shift["shift_date"] for shift in previous if shift["shift_date"] >= week_begin}
+    if day not in days and len(days) >= emp["max_days"]:
+        raise InputError(f"Employee reached their maximum of {emp['max_days']} days this week")
+    date_base = as_date(day).toordinal()*1440
+    a1 = date_base+as_time(start)
+    a2 = date_base+as_time(end)+(1440 if as_time(end) <= as_time(start) else 0)
+    for shift in previous:
+        prior_base = as_date(shift["shift_date"]).toordinal()*1440
+        b1 = prior_base+as_time(shift["start_time"])
+        b2 = prior_base+as_time(shift["end_time"])+(1440 if as_time(shift["end_time"]) <= as_time(shift["start_time"]) else 0)
+        if a1 < b2 and b1 < a2:
+            raise InputError("Employee already has an overlapping shift, possibly at another store")
+
+
 def audit(con, user, action, entity, record_id, detail):
     con.execute("INSERT INTO audit_log(username,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user, action, entity, record_id, json.dumps(detail, sort_keys=True), utc_now()))
@@ -319,7 +364,7 @@ def list_data(user):
         if not allowed:
             return {"stores": [], "employees": [], "employee_stores": [], "shifts": [], "entries": []}
         placeholders = ",".join("?" for _ in allowed)
-        employees = rows(con, f"""SELECT DISTINCT e.id,e.name,e.role,e.active,e.created_at FROM employees e
+        employees = rows(con, f"""SELECT DISTINCT e.id,e.name,e.role,e.max_days,e.availability_json,e.active,e.created_at FROM employees e
                          JOIN employee_stores es ON es.employee_id=e.id WHERE es.store_id IN ({placeholders})
                          ORDER BY e.active DESC,e.name""", allowed)
         return {
@@ -416,7 +461,7 @@ def generate_week(user, store_id, week_start):
         with con:
             store = ensure_record(con, "stores", store_id, True)
             needs = json.loads(store["staffing_json"])
-            employees = rows(con, """SELECT e.id,e.name FROM employees e JOIN employee_stores es
+            employees = rows(con, """SELECT e.id,e.name,e.max_days,e.availability_json FROM employees e JOIN employee_stores es
                                      ON es.employee_id=e.id WHERE es.store_id=? AND e.active=1
                                      ORDER BY e.id""", (store_id,))
             existing = rows(con, """SELECT employee_id,store_id,shift_date,start_time,end_time,break_minutes
@@ -444,11 +489,6 @@ def generate_week(user, store_id, week_start):
                 needed = max(0, needs[weekday] - day_store_count.get(day, 0))
                 busy = day_people.setdefault(day, set())
                 for slot in range(needed):
-                    eligible = [emp for emp in employees if emp["id"] not in busy and total_mins.get(emp["id"], 0) + paid_mins <= 2400]
-                    if not eligible:
-                        unfilled.append({"date": day, "remaining": needed - slot})
-                        break
-                    emp = min(eligible, key=lambda item: (total_mins.get(item["id"], 0), item["id"]))
                     # Stagger shifts across the operating hours when multiple people are needed.
                     offset = 0 if needs[weekday] <= 1 else round((span-duration) *
                                      (day_store_count.get(day, 0) + slot) / max(1, needs[weekday]-1))
@@ -456,6 +496,19 @@ def generate_week(user, store_id, week_start):
                     start_time = f"{start_min//60:02d}:{start_min%60:02d}"
                     end_min = start_min + duration
                     end_time = f"{end_min//60:02d}:{end_min%60:02d}"
+                    eligible = []
+                    for candidate in employees:
+                        if candidate["id"] in busy or total_mins.get(candidate["id"], 0) + paid_mins > 2400:
+                            continue
+                        try:
+                            validate_employee_shift(con, candidate["id"], day, start_time, end_time)
+                        except InputError:
+                            continue
+                        eligible.append(candidate)
+                    if not eligible:
+                        unfilled.append({"date": day, "remaining": needed - slot})
+                        break
+                    emp = min(eligible, key=lambda item: (total_mins.get(item["id"], 0), item["id"]))
                     rid = con.execute("""INSERT INTO shifts(employee_id,store_id,shift_date,start_time,end_time,
                         break_minutes,notes,status,generated,created_at) VALUES(?,?,?,?,?,?,'Auto-generated; review before publishing','draft',1,?)""",
                         (emp["id"], store_id, day, start_time, end_time, pause, utc_now())).lastrowid
@@ -525,7 +578,7 @@ def calculate_payroll(start, end, store_filter=None):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ShiftLedger/1.1"
+    server_version = "StaffWeek-ShiftLedger/1.2"
 
     def log_message(self, fmt, *args):
         print("[%s] %s %s" % (utc_now(), self.client_address[0], fmt % args), flush=True)
@@ -604,7 +657,7 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         try:
             if path == "/api/health" and method == "GET":
-                return self.json(200, {"ok": True, "version": "1.1.0"})
+                return self.json(200, {"ok": True, "version": "1.2.0"})
             if method != "GET" and not self.same_origin():
                 return self.json(403, {"error": "Cross-origin request rejected"})
             if path == "/api/login" and method == "POST":
@@ -714,6 +767,7 @@ class Handler(BaseHTTPRequestHandler):
                 name = require_string(body.get("name", ""), "Employee name", 120)
                 role = require_string(body.get("role", ""), "Role", 100, True)
                 rate = cents(body.get("rate"))
+                max_days = integer_range(body.get("max_days", 5), "Maximum days per week", 1, 7)
                 store_ids = body.get("store_ids", [])
                 if not isinstance(store_ids, list) or not store_ids or len(store_ids) > 100:
                     raise InputError("Select at least one store")
@@ -727,19 +781,33 @@ class Handler(BaseHTTPRequestHandler):
                             old_employee = ensure_record(con, "employees", rid)
                             prior_rates = {r["store_id"]:r["rate_cents"] for r in rows(con, "SELECT store_id,rate_cents FROM employee_stores WHERE employee_id=?", (rid,))}
                             active = boolean(body.get("active", True))
-                            con.execute("UPDATE employees SET name=?,role=?,rate_cents=?,active=? WHERE id=?", (name, role, rate, active, rid))
+                            con.execute("UPDATE employees SET name=?,role=?,rate_cents=?,max_days=?,active=? WHERE id=?", (name, role, rate, max_days, active, rid))
                             con.execute("DELETE FROM employee_stores WHERE employee_id=?", (rid,))
                             action = "update"
                         else:
-                            rid = con.execute("INSERT INTO employees(name,role,rate_cents,created_at) VALUES(?,?,?,?)",
-                                              (name, role, rate, utc_now())).lastrowid
+                            rid = con.execute("INSERT INTO employees(name,role,rate_cents,max_days,created_at) VALUES(?,?,?,?,?)",
+                                              (name, role, rate, max_days, utc_now())).lastrowid
                             action = "create"
                             prior_rates = {}
                         changed_rate = action == "update" and rate != old_employee["rate_cents"]
                         con.executemany("INSERT INTO employee_stores(employee_id,store_id,rate_cents) VALUES(?,?,?)",
                                         ((rid, s, rate if changed_rate else prior_rates.get(s, rate)) for s in store_ids))
-                        audit(con, user["username"], action, "employee", rid, {"name": name, "role": role, "rate_cents": rate, "store_ids": store_ids})
+                        audit(con, user["username"], action, "employee", rid, {"name": name, "role": role, "rate_cents": rate, "max_days": max_days, "store_ids": store_ids})
                 return self.json(200, {"id": rid})
+            if path == "/api/availability" and method == "POST":
+                body = self.read_json()
+                employee_id = positive_id(body.get("employee_id"), "employee")
+                availability = availability_payload(body.get("weekdays"))
+                with db() as con:
+                    with con:
+                        ensure_record(con, "employees", employee_id)
+                        if not can_manage_employee(con, user, employee_id):
+                            raise PermissionError("You do not manage this employee")
+                        previous = con.execute("SELECT availability_json FROM employees WHERE id=?", (employee_id,)).fetchone()[0]
+                        con.execute("UPDATE employees SET availability_json=? WHERE id=?", (availability, employee_id))
+                        audit(con, user["username"], "update_availability", "employee", employee_id,
+                              {"previous": json.loads(previous), "new": json.loads(availability)})
+                return self.json(200, {"ok": True})
             if path == "/api/store-rate" and method == "POST":
                 body = self.read_json()
                 employee_id = positive_id(body.get("employee_id"), "employee")
@@ -768,11 +836,13 @@ class Handler(BaseHTTPRequestHandler):
                             rid = positive_id(body["id"], "shift")
                             old = ensure_record(con, "shifts", rid)
                             authorize_store(user, old["store_id"])
+                            validate_employee_shift(con, emp, day, start, end, skip_id=rid)
                             con.execute("""UPDATE shifts SET employee_id=?,store_id=?,shift_date=?,start_time=?,end_time=?,
                                            break_minutes=?,notes=?,status=? WHERE id=?""",
                                         (emp, store, day, start, end, pause, notes, status, rid))
                             action = "update"
                         else:
+                            validate_employee_shift(con, emp, day, start, end)
                             rid = con.execute("""INSERT INTO shifts(employee_id,store_id,shift_date,start_time,end_time,
                                                     break_minutes,notes,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",
                                               (emp, store, day, start, end, pause, notes, status, utc_now())).lastrowid
@@ -813,6 +883,7 @@ class Handler(BaseHTTPRequestHandler):
                                       AND start_time=? AND end_time=? AND deleted_at IS NULL""",
                                                   (emp, store, current.isoformat(), st, en)).fetchone()
                                 if not dup:
+                                    validate_employee_shift(con, emp, current.isoformat(), st, en)
                                     con.execute("""INSERT INTO shifts(employee_id,store_id,shift_date,start_time,end_time,break_minutes,
                                                  notes,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",
                                                 (emp, store, current.isoformat(), st, en, pause, notes, status, utc_now()))

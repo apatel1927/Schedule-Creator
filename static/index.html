@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#111e30">
-  <meta name="description" content="ShiftLedger: multi-store employee scheduling, time tracking and pay estimates.">
-  <title>ShiftLedger — Team scheduling</title>
+  <meta name="theme-color" content="#172b52">
+  <meta name="description" content="StaffWeek: self-hosted multi-store employee scheduling, availability, time tracking and payroll estimates.">
+  <title>StaffWeek — Scheduling &amp; payroll</title>
   <link rel="stylesheet" href="/app.css">
   <script defer src="/app.js"></script>
 </head>
 <body>
   <div id="login-screen" class="login-screen">
     <div class="login-art">
-      <div class="login-symbol"><span>▦</span> ShiftLedger</div>
+      <div class="login-symbol"><span>▦</span> StaffWeek</div>
       <div class="login-art-content">
-        <div class="eyebrow light">A BETTER WAY TO RUN YOUR TEAM</div>
-        <h1>Good schedules.<br><em>Great shifts.</em></h1>
-        <p>Plan ahead, manage every location, and keep your team's hours in one clear place.</p>
+        <div class="eyebrow light">SCHEDULING • AVAILABILITY • PAYROLL</div>
+        <h1>Your team.<br><em>Your week.</em></h1>
+        <p>The simple StaffWeek workflow with multiple stores, secure manager accounts, and accurate paid-hours records—hosted on your own Unraid server.</p>
         <div class="mini-schedule">
           <div class="mini-top"><strong>Weekly overview</strong><span>● &nbsp; All teams</span></div>
           <div class="mini-days"><span>MON</span><span>TUE</span><span>WED</span><span>THU</span><span>FRI</span></div>
@@ -27,7 +27,7 @@
     </div>
     <div class="login-form-zone">
       <form id="login-form" class="login-card">
-        <div class="login-mobile-brand"><span>▦</span> ShiftLedger</div>
+        <div class="login-mobile-brand"><span>▦</span> StaffWeek</div>
         <div class="small-icon">↗</div>
         <h2>Welcome back</h2>
         <p>Sign in to manage your schedules and team.</p>
@@ -42,35 +42,30 @@
     </div>
   </div>
 
-  <div id="app" class="app-shell hidden">
-    <aside class="sidebar">
-      <div class="brand"><div class="brand-mark">▦</div><div><strong>ShiftLedger</strong><small>TEAM OPERATIONS</small></div></div>
-      <div class="sidebar-kicker">WORKSPACE</div>
-      <nav id="navigation" aria-label="Main navigation">
-        <button data-view="overview" class="nav-link"><span class="nav-icon">◫</span> Overview</button>
-        <button data-view="schedule" class="nav-link active"><span class="nav-icon">▦</span> Schedule</button>
-        <button data-view="employees" class="nav-link"><span class="nav-icon">♙</span> Employees</button>
-        <button data-view="time" class="nav-link"><span class="nav-icon">◷</span> Time & tasks</button>
-        <button data-view="payroll" class="nav-link owner-only"><span class="nav-icon">＄</span> Payroll</button>
+  <div id="app" class="staffweek-shell hidden">
+    <header class="staffweek-header">
+      <div class="staffweek-header-inner">
+        <div class="staffweek-brand"><h1>StaffWeek <small>by ShiftLedger</small></h1><p>Employee scheduling, availability &amp; payroll — for every store</p></div>
+        <div class="staffweek-account"><div class="user-avatar" id="user-avatar">A</div><div><strong id="current-user">Admin</strong><span id="current-role">Owner account</span></div><button class="logout" title="Change password" data-action="change-password">⚙</button><button class="logout" title="Sign out" id="logout-btn">↪</button></div>
+      </div>
+    </header>
+    <main class="staffweek-main">
+      <nav id="navigation" class="staffweek-nav" aria-label="Main navigation">
+        <button data-view="employees" class="nav-link">Employees</button>
+        <button data-view="availability" class="nav-link">Availability</button>
+        <button data-view="schedule" class="nav-link active">Schedule</button>
+        <button data-view="time" class="nav-link">Time &amp; tasks</button>
+        <button data-view="payroll" class="nav-link owner-only">Payroll</button>
+        <button data-view="stores" class="nav-link">Stores &amp; settings</button>
+        <button data-view="managers" class="nav-link owner-only">Manager logins</button>
       </nav>
-      <div class="sidebar-kicker second-kicker">ADMINISTRATION</div>
-      <nav>
-        <button data-view="stores" class="nav-link"><span class="nav-icon">⌂</span> Stores</button>
-        <button data-view="managers" class="nav-link owner-only"><span class="nav-icon">♧</span> Managers & access</button>
-      </nav>
-      <div class="sidebar-spacer"></div>
-      <div class="sidebar-callout"><div>✧ &nbsp; MADE FOR YOUR TEAM</div><p>Create schedules weeks or months ahead—at every store.</p></div>
-      <div class="user-panel"><div class="user-avatar" id="user-avatar">A</div><div><strong id="current-user">Admin</strong><span id="current-role">Owner account</span></div><button class="logout" title="Change password" data-action="change-password">⚙</button><button class="logout" title="Sign out" id="logout-btn">↪</button></div>
-    </aside>
-
-    <main class="main-content">
-      <header class="topbar"><button id="mobile-nav" class="icon-btn hamburger" aria-label="Toggle menu">☰</button><div class="crumb">WORKSPACE <span>/</span> <b id="crumb-page">Schedule</b></div><div class="topbar-actions"><span class="today-chip" id="header-today"></span><button class="btn primary top-new" data-action="new-shift"><span>＋</span> New shift</button></div></header>
+      <div class="staffweek-context"><span id="header-today"></span><span>Viewing: <strong id="crumb-page">Schedule</strong></span><button class="btn primary" data-action="new-shift">＋ Add shift</button></div>
       <div id="page" class="page-content"></div>
     </main>
   </div>
 
   <div id="modal-root" class="modal-root hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-    <div id="modal-panel" class="modal-panel"><div class="modal-head"><div><div class="eyebrow">SHIFTLEDGER</div><h2 id="modal-title"></h2></div><button id="close-modal" class="icon-btn" aria-label="Close">✕</button></div><div id="modal-content"></div></div>
+    <div id="modal-panel" class="modal-panel"><div class="modal-head"><div><div class="eyebrow">STAFFWEEK</div><h2 id="modal-title"></h2></div><button id="close-modal" class="icon-btn" aria-label="Close">✕</button></div><div id="modal-content"></div></div>
   </div>
   <div id="toast" class="toast hidden" role="status"></div>
 </body>

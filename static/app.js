@@ -1,7 +1,7 @@
 /* ShiftLedger browser UI — no external scripts or third-party services. */
 const state = {
   session: null, data: null, accounts: null, view: 'schedule',
-  store: 'all', mode: 'week', cursor: new Date(), estimate: null,
+  store: 'all', mode: 'week', scheduleLayout: 'table', cursor: new Date(), estimate: null,
   payrollStart: '', payrollEnd: '', payroll: null, payrollStore: 'all'
 };
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -84,10 +84,9 @@ function commonStoreSelector() {return `<select id="global-store" aria-label="Fi
 function render() {
   if (!state.data) return;
   $$('.nav-link').forEach(el=>el.classList.toggle('active',el.dataset.view===state.view));
-  const titles={overview:'Overview',schedule:'Schedule',employees:'Employees',time:'Time & tasks',payroll:'Payroll',stores:'Stores',managers:'Managers & access'};
+  const titles={overview:'Overview',schedule:'Schedule',employees:'Employees',availability:'Availability',time:'Time & tasks',payroll:'Payroll',stores:'Stores & settings',managers:'Manager logins'};
   $('#crumb-page').textContent=titles[state.view];
-  $('#page').innerHTML=({overview:renderOverview,schedule:renderSchedule,employees:renderEmployees,time:renderTime,payroll:renderPayroll,stores:renderStores,managers:renderManagers}[state.view]||renderSchedule)();
-  $('.sidebar').classList.remove('open');
+  $('#page').innerHTML=({overview:renderOverview,schedule:renderSchedule,employees:renderEmployees,availability:renderAvailability,time:renderTime,payroll:renderPayroll,stores:renderStores,managers:renderManagers}[state.view]||renderSchedule)();
 }
 function renderOverview() {
   const now=new Date(), first=localDay(monday(now)), last=localDay(addDays(monday(now),6));
@@ -117,23 +116,48 @@ function renderCalendar() {
   }
   return `<div class="calendar-grid">${cells}</div>`;
 }
+function renderWeekTable() {
+  const beginning=monday(state.cursor);
+  const days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+  const shownStores=allStores().filter(s=>state.store==='all'||s.id===Number(state.store));
+  return shownStores.map(store=>{
+    const shifts=visibleShifts().filter(s=>s.store_id===store.id&&s.shift_date>=localDay(beginning)&&s.shift_date<=localDay(addDays(beginning,6)));
+    const rows=days.map((day,i)=>{
+      const date=localDay(addDays(beginning,i)), daily=shifts.filter(s=>s.shift_date===date);
+      return (daily.length?daily:[null]).map((shift,index)=>`<tr><td><strong>${index===0?day:''}</strong><small>${index===0?shortDate(date):''}</small></td><td>${shift?esc(getEmployee(shift.employee_id)?.name||'Unknown employee'):'<span class="muted">No shifts</span>'}</td><td>${shift?`${time12(shift.start_time)}–${time12(shift.end_time)}`:'—'}</td><td>${shift?hours(shiftMins(shift)):'—'}</td><td>${shift?badge(shift.status,shift.status==='draft'?'draft':''):'—'}</td><td class="actions no-print">${shift?`<button class="text-btn" data-action="edit-shift" data-id="${shift.id}">Edit</button>`:`<button class="text-btn" data-action="new-shift" data-date="${date}" data-store="${store.id}">＋ Add shift</button>`}</td></tr>`).join('');
+    }).join('');
+    return `<section class="card staffweek-table"><div class="staffweek-table-header"><h3>${esc(store.name)}</h3><span>${shifts.length} shifts · ${hours(shifts.reduce((sum,s)=>sum+shiftMins(s),0))} paid hours</span></div><div class="table-card"><table class="data-table"><thead><tr><th>Day / date</th><th>Employee</th><th>Shift</th><th>Hours</th><th>Status</th><th class="no-print">Change</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+  }).join('')||empty('No stores available',isOwner()?'Create a store to start planning the weekly schedule.':'Ask the owner to assign you a store.',isOwner()?'new-store':'','Add store');
+}
 function renderSchedule() {
   const range=getRange();const count=visibleShifts().filter(s=>s.shift_date>=localDay(range.first)&&s.shift_date<=localDay(range.last)).length;
   const estimate=state.estimate, week=localDay(monday(state.cursor));
   const help=state.store==='all'?'Select one store above to auto-generate shifts for that location.':'Generate draft shifts from your store staffing setup, then click any shift to change the assigned employee or hours.';
   const setupActions=allStores().length?`<button class="btn" data-action="staffing">⚙ Staffing setup</button><button class="btn primary" data-action="generate-week">✦ Generate week</button>`:(isOwner()?'<button class="btn primary" data-view="stores">＋ Create a store</button>':'');
-  return heading('PLAN WITH CONFIDENCE','Team schedule','Auto-build each week from assigned employees, then adjust shifts manually.',`<button class="btn" data-action="bulk">↻ Repeating shifts</button><button class="btn" data-action="new-shift">＋ Add shift</button>`)+
+  return heading('STAFFWEEK SCHEDULER','Schedule','A dated weekly schedule for each store. Auto-generate a week, then make any changes you need.',`<button class="btn secondary no-print" data-action="print-schedule">Print / Save PDF</button><button class="btn no-print" data-action="bulk">↻ Repeating shifts</button><button class="btn no-print" data-action="new-shift">＋ Add shift</button>`)+
   `<div class="filter-strip"><span class="filter-label">SCHEDULE STORE</span>${commonStoreSelector()}<span class="tab-note">${esc(help)}</span><div class="spacer"></div>${setupActions}</div>
   <div class="stats-grid">${statistic('Week of',shortDate(week),'Monday–Sunday','▦')}${statistic('Scheduled shifts',estimate?.shift_count??'—',`${estimate?.draft_count??0} drafts this week`,'♙')}${statistic('Scheduled hours',estimate?hours(estimate.planned_minutes):'—','Planned paid hours, less unpaid breaks','◷','blue')}${statistic('Estimated weekly wages',estimate?money(estimate.estimated_base_cents):'—','Straight-time wages only; excludes overtime, taxes & extras','＄','purple')}</div>
   ${estimate?.unfilled_slots>0?`<div class="manager-permissions"><strong>${estimate.unfilled_slots} staffing slots not scheduled.</strong> Generate the week to fill openings based on the store template and available employees. Shift changes are never overwritten.</div>`:''}`+
-  `<section class="card calendar-card"><div class="calendar-toolbar"><div class="toolbar-group"><div class="calendar-month-title">${esc(range.label)}</div><div class="calendar-nav"><button class="icon-btn" data-action="prev" title="Previous">‹</button><button class="icon-btn" data-action="today" title="Today">◎</button><button class="icon-btn" data-action="next" title="Next">›</button></div></div><div class="toolbar-group"><div class="segmented"><button data-action="calendar-week" class="${state.mode==='week'?'active':''}">Week</button><button data-action="calendar-month" class="${state.mode==='month'?'active':''}">Month</button></div></div></div>${renderCalendar()}<div class="calendar-footer"><div class="legend"><span><i></i> Published</span><span><i class="draft"></i> Draft</span></div><span>${count} shift${count===1?'':'s'} in this view</span></div></section>
+  `<section class="card calendar-card no-print"><div class="calendar-toolbar"><div class="toolbar-group"><div class="calendar-month-title">${state.scheduleLayout==='table'?esc(`${fmtMonthDay(monday(state.cursor))} – ${fmtMonthDay(addDays(monday(state.cursor),6))}, ${addDays(monday(state.cursor),6).getFullYear()}`):esc(range.label)}</div><div class="calendar-nav"><button class="icon-btn" data-action="prev" title="Previous">‹</button><button class="icon-btn" data-action="today" title="Today">◎</button><button class="icon-btn" data-action="next" title="Next">›</button></div><input id="week-jump" type="date" value="${localDay(monday(state.cursor))}" aria-label="Jump to any week" title="Jump to any week"></div><div class="toolbar-group"><div class="segmented"><button data-action="view-table" class="${state.scheduleLayout==='table'?'active':''}">Weekly table</button><button data-action="view-calendar" class="${state.scheduleLayout==='calendar'?'active':''}">Calendar</button></div></div>${state.scheduleLayout==='calendar'?`<div class="segmented"><button data-action="calendar-week" class="${state.mode==='week'?'active':''}">Week</button><button data-action="calendar-month" class="${state.mode==='month'?'active':''}">Month</button></div>`:''}</div></section>
+  <div id="schedule-print-content">${state.scheduleLayout==='table'?renderWeekTable():`<section class="card calendar-card">${renderCalendar()}<div class="calendar-footer"><div class="legend"><span><i></i> Published</span><span><i class="draft"></i> Draft</span></div><span>${count} shift${count===1?'':'s'} in this view</span></div></section>`}</div>
   <div class="filter-strip" style="margin-top:15px"><span class="tab-note">Estimate is based on scheduled shifts at current store rates. Actual payroll includes separately logged shopping, pulling, and other paid tasks.</span><div class="spacer"></div><button class="btn" data-action="publish-range">✓ Publish visible dates</button></div>`;
 }
 function renderEmployees() {
   const employees=state.data.employees.filter(e=>state.store==='all'||state.data.employee_stores.some(es=>es.employee_id===e.id&&es.store_id===Number(state.store)));
   const addBtn=isOwner()?'<button class="btn primary" data-action="new-employee">＋ Add employee</button>':'';
   return heading('THE PEOPLE BEHIND THE WORK','Employees','Manage your team, store assignments and hourly pay rates.',`${commonStoreSelector()}${addBtn}`)+
-  `<div class="card table-card">${employees.length?`<table class="data-table"><thead><tr><th>Employee</th><th>Assigned stores</th><th>Hourly rate by store</th><th>Status</th><th></th></tr></thead><tbody>${employees.map(e=>{const assoc=state.data.employee_stores.filter(x=>x.employee_id===e.id);return `<tr><td><div class="table-person">${avatar(e)}<div><strong>${esc(e.name)}</strong><small>${esc(e.role||'Team member')}</small></div></div></td><td>${esc(assoc.map(x=>getStore(x.store_id)?.name).filter(Boolean).join(' · '))}</td><td>${assoc.map(x=>`<div style="margin:3px 0;white-space:nowrap"><strong class="currency">${money(x.rate_cents??e.rate_cents)}/hr</strong><span class="inline-detail"> · ${esc(getStore(x.store_id)?.name||'')}</span> <button class="text-btn" data-action="edit-rate" data-employee="${e.id}" data-store="${x.store_id}">Edit rate</button></div>`).join('')}</td><td>${badge(e.active?'Active':'Inactive',e.active?'':'gray')}</td><td class="actions">${isOwner()?`<button class="text-btn" data-action="edit-employee" data-id="${e.id}">Edit →</button>`:''}</td></tr>`}).join('')}</tbody></table>`:empty('No employees yet','Add team members, then assign them to one or more stores.',isOwner()?'new-employee':'', 'Add employee')}</div>`;
+  `<div class="card table-card">${employees.length?`<table class="data-table"><thead><tr><th>Employee</th><th>Assigned stores</th><th>Hourly rate by store</th><th>Max days / week</th><th>Status</th><th></th></tr></thead><tbody>${employees.map(e=>{const assoc=state.data.employee_stores.filter(x=>x.employee_id===e.id);return `<tr><td><div class="table-person">${avatar(e)}<div><strong>${esc(e.name)}</strong><small>${esc(e.role||'Team member')}</small></div></div></td><td>${esc(assoc.map(x=>getStore(x.store_id)?.name).filter(Boolean).join(' · '))}</td><td>${assoc.map(x=>`<div style="margin:3px 0;white-space:nowrap"><strong class="currency">${money(x.rate_cents??e.rate_cents)}/hr</strong><span class="inline-detail"> · ${esc(getStore(x.store_id)?.name||'')}</span> <button class="text-btn" data-action="edit-rate" data-employee="${e.id}" data-store="${x.store_id}">Edit rate</button></div>`).join('')}</td><td>${Number(e.max_days||5)}</td><td>${badge(e.active?'Active':'Inactive',e.active?'':'gray')}</td><td class="actions">${isOwner()?`<button class="text-btn" data-action="edit-employee" data-id="${e.id}">Edit →</button>`:''}</td></tr>`}).join('')}</tbody></table>`:empty('No employees yet','Add team members, then assign them to one or more stores.',isOwner()?'new-employee':'', 'Add employee')}</div>`;
+}
+function availableDays(employee) {
+  try {const days=JSON.parse(employee.availability_json);return Array.isArray(days)&&days.length===7?days:[1,1,1,1,1,1,1];}
+  catch{return [1,1,1,1,1,1,1];}
+}
+function renderAvailability() {
+  const people=state.data.employees.filter(e=>e.active&&(state.store==='all'||state.data.employee_stores.some(es=>es.employee_id===e.id&&es.store_id===Number(state.store))));
+  const days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+  return heading('STAFFWEEK AVAILABILITY','Weekly availability','Select the weekdays each employee can work. Auto-scheduling and manual shifts respect these settings.',commonStoreSelector())+
+    `<div class="staffweek-hint">Availability is shared across all stores assigned to an employee. The maximum number of workdays per week is configured under Employees.</div>
+    ${people.length?people.map(e=>`<section class="card availability-panel"><div class="availability-heading">${avatar(e)}<div><h3>${esc(e.name)}</h3><p>${esc(e.role||'Team member')} · Up to ${Number(e.max_days||5)} days per week</p></div></div><div class="availability-week">${days.map((day,i)=>`<label><input name="available_day" type="checkbox" data-employee="${e.id}" data-weekday="${i}" ${availableDays(e)[i]?'checked':''}><span>${day}</span></label>`).join('')}</div></section>`).join(''):empty('No employees assigned','Create an employee and assign them to this store to set availability.',isOwner()?'new-employee':'','Add employee')}`;
 }
 function renderTime() {
   const entries=visibleEntries().slice().sort((a,b)=>b.entry_date.localeCompare(a.entry_date)||b.id-a.id);
@@ -146,7 +170,7 @@ function renderPayroll() {
   if(!isOwner()) return empty('Owner only','Payroll estimates are restricted to the owner.');
   const p=state.payroll;
   const rows=p?.employees||[];
-  return heading('CLEAR NUMBERS, EVERY PAY PERIOD','Payroll estimate','Review actual paid hours across all stores, including extra tasks.',`<button class="btn" data-action="csv-payroll">↓ Export CSV</button>`)+
+  return heading('CLEAR NUMBERS, EVERY PAY PERIOD','Payroll estimate','Review actual paid hours across all stores, including extra tasks.',`<button class="btn secondary no-print" data-action="print-payroll">Print / Save PDF</button><button class="btn no-print" data-action="csv-payroll">↓ Export CSV</button>`)+
   `<div class="card" style="padding:20px;margin-bottom:17px"><div class="filter-strip" style="margin:0"><span class="filter-label">FROM</span><input type="date" id="payroll-start" value="${esc(state.payrollStart)}" aria-label="Payroll start date" style="padding:9px"><span class="filter-label">TO</span><input type="date" id="payroll-end" value="${esc(state.payrollEnd)}" aria-label="Payroll end date" style="padding:9px"><span class="filter-label">STORE</span><select id="payroll-store">${storeOptions(state.payrollStore)}</select><button class="btn primary" data-action="calculate-pay">Calculate pay →</button></div></div>
   <div class="stats-grid">${statistic('Employees paid',rows.length,'With recorded hours','♙')}${statistic('Total hours',hours(p?.total_minutes||0),'Actual hours in date range','◷','blue')}${statistic('Overtime hours',hours(p?.total_overtime_minutes||0),'Beyond 40 per Monday–Sunday week','↗','orange')}${statistic('Estimated gross pay',money(p?.total_gross_cents||0),'Before deductions and taxes','＄','purple')}</div>
   <div class="card table-card">${rows.length?`<table class="data-table"><thead><tr><th>Employee</th><th>Total hours</th><th>OT hours</th><th>Base wages</th><th>OT premium</th><th>Gross estimate</th></tr></thead><tbody>${rows.map(r=>`<tr><td><div class="table-person">${avatar(getEmployee(r.employee_id))}<div><strong>${esc(r.name)}</strong><small>${r.entry_count} time records</small></div></div></td><td><strong>${hours(r.minutes)}</strong></td><td>${hours(r.overtime_minutes)}</td><td>${money(r.base_cents)}</td><td>${money(r.premium_cents)}</td><td><strong>${money(r.gross_cents)}</strong></td></tr>`).join('')}</tbody></table>`:empty('No payroll entries in this range','Record worked hours in Time & tasks, then calculate the period.','new-entry','Log hours')}</div>
@@ -192,9 +216,9 @@ function employeeChoices(store,selected) {
 }
 function employeesSelect(store,selected){return selectField('employee_id','Employee',employeeChoices(store,selected));}
 function statusChoice(value='draft'){return selectField('status','Schedule status',`<option value="draft" ${value==='draft'?'selected':''}>Draft — not finalized</option><option value="published" ${value==='published'?'selected':''}>Published</option>`);}
-function showShift(s,preferredDate='') {
+function showShift(s,preferredDate='',preferredStore) {
   if (!allStores().some(x=>x.active)){toast('Add an active store first',true);return;}
-  const store=s?.store_id|| (state.store!=='all'?Number(state.store):allStores().find(x=>x.active)?.id);
+  const store=s?.store_id|| preferredStore || (state.store!=='all'?Number(state.store):allStores().find(x=>x.active)?.id);
   const initial=preferredDate||s?.shift_date||localDay(new Date());
   openModal(s?'Edit shift':'Schedule a shift',`<form id="shift-form"><input type="hidden" name="id" value="${s?.id||''}"><div class="two-col"><div>${storeSelectField(store)}</div><div>${input('date','Shift date',initial,'date','required')}</div></div>${employeesSelect(store,s?.employee_id)}<div class="two-col"><div>${input('start_time','Start time',s?.start_time||'09:00','time','required')}</div><div>${input('end_time','End time',s?.end_time||'17:00','time','required')}</div></div>${input('break_minutes','Unpaid break (minutes)',s?.break_minutes||0,'number','min="0" max="600" required')}${statusChoice(s?.status)}${textArea('notes','Notes (optional)',s?.notes||'')}${footer(s?'Save changes':'Create shift',s?`<button class="btn danger delete" type="button" data-action="delete-shift" data-id="${s.id}">Archive shift</button>`:'')}${s?`<button class="btn" style="width:100%;margin-top:12px" type="button" data-action="record-shift" data-id="${s.id}">◷ Record these hours as worked</button>`:''}</form>`);
 }
@@ -209,7 +233,7 @@ function storeChecks(ids) {return `<div class="check-row">${allStores().filter(s
 function showEmployee(e) {
   if(!isOwner())return;
   const ids=e?state.data.employee_stores.filter(x=>x.employee_id===e.id).map(x=>x.store_id):state.store==='all'?[allStores().find(x=>x.active)?.id].filter(Boolean):[Number(state.store)];
-  openModal(e?'Edit employee':'Add employee',`<form id="employee-form"><input type="hidden" name="id" value="${e?.id||''}">${input('name','Full name',e?.name||'','text','required maxlength="120" placeholder="Employee name"')}${input('role','Position / role',e?.role||'','text','maxlength="100" placeholder="Cashier, stocker, etc."')}${input('rate','Default hourly pay ($)',e?(e.rate_cents/100).toFixed(2):'15.00','number','min="0" step="0.01" required')}<p class="helper">Store-specific rates can be adjusted separately in the employee list. Existing time records retain their original rate.</p><label>Assigned stores</label>${storeChecks(ids)}${e?`<div class="form-checkbox"><input id="active-employee" name="active" type="checkbox" ${e.active?'checked':''}><label for="active-employee">Active employee</label></div>`:''}${footer(e?'Save employee':'Create employee')}</form>`);
+  openModal(e?'Edit employee':'Add employee',`<form id="employee-form"><input type="hidden" name="id" value="${e?.id||''}">${input('name','Full name',e?.name||'','text','required maxlength="120" placeholder="Employee name"')}${input('role','Position / role',e?.role||'','text','maxlength="100" placeholder="Cashier, stocker, etc."')}<div class="two-col"><div>${input('rate','Default hourly pay ($)',e?(e.rate_cents/100).toFixed(2):'15.00','number','min="0" step="0.01" required')}</div><div>${input('max_days','Maximum days per week',e?.max_days||5,'number','min="1" max="7" step="1" required')}</div></div><p class="helper">Store-specific rates can be adjusted separately in the employee list. Existing time records retain their original rate.</p><label>Assigned stores</label>${storeChecks(ids)}${e?`<div class="form-checkbox"><input id="active-employee" name="active" type="checkbox" ${e.active?'checked':''}><label for="active-employee">Active employee</label></div>`:''}${footer(e?'Save employee':'Create employee')}</form>`);
 }
 function showRate(employeeId,storeId) {
   const employee=getEmployee(employeeId),store=getStore(storeId),assoc=state.data.employee_stores.find(x=>x.employee_id===employeeId&&x.store_id===storeId);
@@ -257,7 +281,7 @@ async function setView(view) {
 async function handleAction(action,btn) {
   const id=Number(btn.dataset.id);
   if(action==='close-modal')return closeModal();
-  if(action==='new-shift')return showShift(null,btn.dataset.date);
+  if(action==='new-shift')return showShift(null,btn.dataset.date,Number(btn.dataset.store)||undefined);
   if(action==='edit-shift')return showShift(state.data.shifts.find(x=>x.id===id));
   if(action==='bulk')return showBulk();
   if(action==='new-employee')return showEmployee();
@@ -279,7 +303,11 @@ async function handleAction(action,btn) {
   if(action==='new-manager')return showManager();
   if(action==='edit-manager')return showManager(state.accounts?.users.find(x=>x.id===id));
   if(action==='change-password')return showChangePassword();
-  if(action==='prev'||action==='next'){state.cursor=state.mode==='month'?new Date(state.cursor.getFullYear(),state.cursor.getMonth()+(action==='next'?1:-1),1,12):addDays(state.cursor,action==='next'?7:-7);await loadEstimate();return render();}
+  if(action==='view-table'){state.scheduleLayout='table';state.mode='week';return render();}
+  if(action==='view-calendar'){state.scheduleLayout='calendar';return render();}
+  if(action==='print-schedule'){state.scheduleLayout='table';state.mode='week';render();window.print();return;}
+  if(action==='print-payroll'){window.print();return;}
+  if(action==='prev'||action==='next'){state.cursor=state.scheduleLayout==='calendar'&&state.mode==='month'?new Date(state.cursor.getFullYear(),state.cursor.getMonth()+(action==='next'?1:-1),1,12):addDays(state.cursor,action==='next'?7:-7);await loadEstimate();return render();}
   if(action==='today'){state.cursor=new Date();await loadEstimate();return render();}
   if(action==='calendar-week'||action==='calendar-month'){state.mode=action==='calendar-week'?'week':'month';await loadEstimate();return render();}
   if(action==='delete-shift'||action==='delete-entry'){
@@ -315,7 +343,7 @@ async function submitModal(form) {
   } else if(kind==='bulk-form'){
     endpoint='/api/shifts/bulk';body={employee_id:Number(v('employee_id')),store_id:Number(v('store_id')),start_date:v('start_date'),end_date:v('end_date'),start_time:v('start_time'),end_time:v('end_time'),break_minutes:Number(v('break_minutes')),status:v('status'),weekdays:values.getAll('weekdays').map(Number),notes:v('notes')};ok='Repeating schedule created';
   } else if(kind==='employee-form'){
-    endpoint='/api/employees';body={id:v('id')||undefined,name:v('name'),role:v('role'),rate:v('rate'),store_ids:values.getAll('store_ids').map(Number),active:form.elements.active?values.has('active'):true};ok='Employee saved';
+    endpoint='/api/employees';body={id:v('id')||undefined,name:v('name'),role:v('role'),rate:v('rate'),max_days:Number(v('max_days')),store_ids:values.getAll('store_ids').map(Number),active:form.elements.active?values.has('active'):true};ok='Employee saved';
   } else if(kind==='store-form'){
     endpoint='/api/stores';body={id:v('id')||undefined,name:v('name'),location:v('location'),color:v('color')||'#3c8d82',active:form.elements.active?values.has('active'):true};ok='Store saved';
   } else if(kind==='staffing-form'){
@@ -354,6 +382,20 @@ document.addEventListener('submit',async event=>{
 });
 document.addEventListener('change',async event=>{
   const t=event.target;
+  if(t.id==='week-jump'){
+    if(t.value){state.cursor=parseDay(t.value);try{await loadEstimate();render();}catch(e){toast(e.message,true);}}
+    return;
+  }
+  if(t.name==='available_day'){
+    const employee=getEmployee(Number(t.dataset.employee));
+    if(!employee)return;
+    const previous=availableDays(employee);
+    const selected=previous.map((yes,i)=>i).filter(i=>i===Number(t.dataset.weekday)?t.checked:Boolean(previous[i]));
+    t.disabled=true;
+    try {await api('/api/availability',{employee_id:employee.id,weekdays:selected});await refresh();toast(`${employee.name}'s availability saved`);}
+    catch(e){t.checked=!t.checked;t.disabled=false;toast(e.message,true);}
+    return;
+  }
   if(t.id==='global-store'){state.store=t.value;try{await loadEstimate();render();}catch(e){toast(e.message,true);}return;}
   if(t.name==='store_id'&&t.closest('#shift-form,#bulk-form,#entry-form')){
     const employee=t.closest('form').elements.employee_id;
@@ -365,7 +407,6 @@ document.addEventListener('change',async event=>{
 });
 $('#login-form').addEventListener('reset',()=>{$('#login-error').textContent='';});
 $('#logout-btn').addEventListener('click',async()=>{try{await api('/api/logout',{});}finally{logoutLocal();}});
-$('#mobile-nav').addEventListener('click',()=>$('.sidebar').classList.toggle('open'));
 $('#close-modal').addEventListener('click',closeModal);
 $('#modal-root').addEventListener('click',event=>{if(event.target.id==='modal-root')closeModal();});
 document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('#modal-root').classList.contains('hidden'))closeModal();});

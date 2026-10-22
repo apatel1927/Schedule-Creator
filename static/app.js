@@ -303,7 +303,7 @@ function showManager(u) {
   if(!isOwner())return;
   const ids=u?state.accounts.user_stores.filter(x=>x.user_id===u.id).map(x=>x.store_id):[allStores().find(s=>s.active)?.id].filter(Boolean);
   if(!ensureActiveStore())return;
-  openModal(u?'Edit manager':'Create manager login',`<form id="manager-form"><input type="hidden" name="id" value="${u?.id||''}">${input('username','Login username',u?.username||'','text','required autocomplete="username" maxlength="80" pattern="[a-zA-Z0-9_-]+" title="Letters, numbers, hyphens and underscores only"')}${input('password',u?'New password (leave blank to keep current)':'Initial password (at least 12 characters)','', 'password',`${u?'':'required'} minlength="12" autocomplete="new-password"`)}<label>Stores this manager can access (select at least one)</label>${storeChecks(ids)}${u?`<div class="form-checkbox"><input type="checkbox" id="manager-active" name="active" ${u.active?'checked':''}><label for="manager-active">Account enabled</label></div>`:''}<p class="tab-note">Give the manager this username and password to sign in on the normal login page. Managers can edit schedules, actual hours and hourly rates for assigned stores; owner-only reports and account administration remain restricted.</p>${footer(u?'Save manager':'Create login')}</form>`);
+  openModal(u?'Edit manager':'Create manager login',`<form id="manager-form"><input type="hidden" name="id" value="${u?.id||''}">${input('username','Login username',u?.username||'','text','required autocomplete="username" maxlength="80" pattern="[a-zA-Z0-9_\\-]+" title="Letters, numbers, hyphens and underscores only"')}${input('password',u?'New password (leave blank to keep current)':'Initial password (at least 12 characters)','', 'password',`${u?'':'required'} minlength="12" autocomplete="new-password"`)}<label>Stores this manager can access (select at least one)</label>${storeChecks(ids)}${u?`<div class="form-checkbox"><input type="checkbox" id="manager-active" name="active" ${u.active?'checked':''}><label for="manager-active">Account enabled</label></div>`:''}<p class="tab-note">Give the manager this username and password to sign in on the normal login page. Managers can edit schedules, actual hours and hourly rates for assigned stores; owner-only reports and account administration remain restricted.</p>${footer(u?'Save manager':'Create login')}</form>`);
 }
 function showChangePassword() {
   openModal('Change my password',`<form id="password-form">${input('current_password','Current password','','password','required autocomplete="current-password"')}${input('new_password','New password (at least 12 characters)','','password','required minlength="12" autocomplete="new-password"')}${footer('Change password')}</form>`);
@@ -402,7 +402,9 @@ async function handleAction(action,btn) {
 }
 
 async function submitModal(form) {
-  const values=new FormData(form);const kind=form.id;
+  const values=new FormData(form);
+  // getAttribute: a form containing <input name="id"> shadows form.id with that input element.
+  const kind=form.getAttribute('id');
   const v=name=>values.get(name)?.toString()||'';
   let body,endpoint,ok;
   if(kind==='shift-form'){
@@ -443,15 +445,15 @@ document.addEventListener('click',async event=>{
   try {await handleAction(btn.dataset.action,btn);}catch(e){toast(e.message,true);}
 });
 document.addEventListener('submit',async event=>{
-  event.preventDefault();const form=event.target;const submit=form.querySelector('button[type=submit]');
+  event.preventDefault();const form=event.target;const formId=form.getAttribute('id');const submit=form.querySelector('button[type=submit]');
   if(submit)submit.disabled=true;
   try {
-    if(form.id==='login-form'){
+    if(formId==='login-form'){
       $('#login-error').textContent='';
       state.session=await api('/api/login',{username:$('#login-user').value.trim(),password:$('#login-pass').value});
       await loadData();showApp();
     } else await submitModal(form);
-  }catch(e){if(form.id==='login-form')$('#login-error').textContent=e.message;else {const error=$('#modal-error');if(error){error.textContent=`Could not save: ${e.message}`;error.classList.remove('hidden');error.scrollIntoView({block:'nearest'});}toast(e.message,true);}}
+  }catch(e){if(formId==='login-form')$('#login-error').textContent=e.message;else {const error=$('#modal-error');if(error){error.textContent=`Could not save: ${e.message}`;error.classList.remove('hidden');error.scrollIntoView({block:'nearest'});}toast(e.message,true);}}
   finally {if(submit)submit.disabled=false;}
 });
 document.addEventListener('change',async event=>{

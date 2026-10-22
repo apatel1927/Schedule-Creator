@@ -21,6 +21,6 @@ done
 [ "$state" = 'healthy' ] || { echo "Native container is not healthy ($state); inspect Unraid Docker logs." >&2; exit 1; }
 
 echo 'PASS: running the published GHCR image with the original persistent appdata.'
-docker exec shiftledger python -c 'import sqlite3; c=sqlite3.connect("/data/shiftledger.sqlite3"); print("Preserved records: " + ", ".join("{}={}".format(t, c.execute("SELECT COUNT(*) FROM {}".format(t)).fetchone()[0]) for t in ("stores","employees","users","shifts","entries")))'
+docker exec shiftledger python -c 'import sqlite3; c=sqlite3.connect("/data/shiftledger.sqlite3"); print("Preserved records: " + ", ".join("{}={}".format(t, c.execute("SELECT COUNT(*) FROM {}".format(t)).fetchone()[0]) for t in ("stores","employees","users","shifts","time_entries")))'
 echo 'PASS: Native Docker-managed ShiftLedger is healthy.'
 echo 'Future updates: Unraid Docker tab > Check for Updates > Update.'

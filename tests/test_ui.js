@@ -65,13 +65,18 @@ context.FormData = class {
 };
 vm.runInContext(`api=async(path,body)=>{globalThis.lastRequest={path,body};return {id:99};};
   refresh=async()=>{};toast=()=>{};closeModal=()=>{};`, context);
-const storeForm={id:'store-form',fields:{id:'',name:'QA Store',location:'Test City',color:'#3c8d82'},elements:{}};
-const employeeForm={id:'employee-form',fields:{id:'',name:'QA Employee',role:'Cashier',rate:'18.50',max_days:'5',store_ids:['1']},elements:{}};
+// Mimic real browsers: a <form> containing <input name="id"> exposes that input as
+// form.id (named-property shadowing), so the form's own id must be read via getAttribute.
+const fakeForm=(formId,fields)=>({id:{name:'id',value:fields.id},getAttribute:k=>k==='id'?formId:null,fields,elements:{}});
+const storeForm=fakeForm('store-form',{id:'',name:'QA Store',location:'Test City',color:'#3c8d82'});
+const employeeForm=fakeForm('employee-form',{id:'',name:'QA Employee',role:'Cashier',rate:'18.50',max_days:'5',store_ids:['1']});
 // The async API calls use our mocked endpoint but the form payload is identical
 // to the real requests, whose persistence is verified by the Python HTTP tests.
 context.qaForm=storeForm;
 async function verify() {
+  context.lastRequest=null;
   await vm.runInContext('submitModal(qaForm)', context);
+  assert.ok(context.lastRequest,'store form submit must call the API');
   assert.equal(context.lastRequest.path,'/api/stores');
   assert.equal(context.lastRequest.body.name,'QA Store');
   context.qaForm=employeeForm;

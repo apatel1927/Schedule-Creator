@@ -42,7 +42,7 @@ Then, in Unraid WebGUI:
 
 1. **Docker → Add Container**, select user template **shiftledger**.
 2. Keep repository `ghcr.io/apatel1927/schedule-creator:latest`, port **8787** and Appdata **`/mnt/user/appdata/shiftledger/data`**. Leave **Initial owner password** blank when migrating an existing database—your real password is already in the database and will be preserved.
-3. Click **Apply**, wait for the image to start, then open `http://YOUR-UNRAID-IP:8787`. Confirm your stores, employees, logins, schedules and hours still appear.
+3. Click **Apply**, wait for the image to start, then open `http://YOUR-UNRAID-IP:8787`. Confirm your stores, employees, logins, schedules and hours still appear. From the installer directory, `sh VERIFY-UNRAID-NATIVE.sh` checks the exact image, persistent volume, application health and database record counts.
 4. In Compose Manager, disable automatic startup of the **old** ShiftLedger stack if it was enabled. Do not start the renamed legacy container while the new container uses the same database.
 
 If native installation fails, run `sh ROLLBACK-UNRAID-NATIVE.sh` from the same installer folder. This parks the new native container and restores the previous Compose container without deleting data. The original appdata and backup remain available.

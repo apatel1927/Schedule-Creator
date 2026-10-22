@@ -263,6 +263,79 @@ class ShiftLedgerTests(unittest.TestCase):
         self.assertEqual(result['created'],1)
         self.assertEqual(result['unfilled'],[{'date':'2026-11-03','remaining':1}])
 
+    def test_overnight_store_and_multiple_simultaneous_evening_workers(self):
+        employees=[self.create_employee([1], rate='20.00') for _ in range(5)]
+        plan={'store_id':1,'open_time':'10:00','close_time':'04:00','slot_minutes':480,
+              'break_minutes':30,'staffing':[5,0,0,0,0,0,0],
+              'templates':[
+                {'id':'day','name':'Day shift','start_time':'10:00','end_time':'18:00',
+                 'break_minutes':30,'staffing':[2,0,0,0,0,0,0]},
+                {'id':'evening','name':'Evening shift','start_time':'20:00','end_time':'04:00',
+                 'break_minutes':30,'staffing':[3,0,0,0,0,0,0]}]}
+        self.request(self.owner,'/api/store-staffing',plan,self.csrf)
+        result=self.request(self.owner,'/api/schedule/generate-week',
+                            {'store_id':1,'week_start':'2026-11-02'},self.csrf)
+        self.assertEqual(result['created'],5)
+        self.assertEqual(result['unfilled'],[])
+        shifts=self.request(self.owner,'/api/data')['shifts']
+        self.assertEqual(len([s for s in shifts if s['start_time']=='20:00' and s['end_time']=='04:00']),3)
+        self.assertEqual(len({s['employee_id'] for s in shifts}),5)
+        self.assertEqual(self.request(self.owner,'/api/schedule/generate-week',
+                         {'store_id':1,'week_start':'2026-11-02'},self.csrf)['created'],0)
+        estimate=self.request(self.owner,'/api/schedule/estimate?store_id=1&week_start=2026-11-02')
+        self.assertEqual(estimate['staffing_target'],5)
+        self.assertEqual(estimate['unfilled_slots'],0)
+        self.assertEqual(estimate['planned_minutes'],5*450)
+        self.assertEqual(estimate['estimated_base_cents'],5*15000)
+        evening=next(s for s in shifts if s['template_key']=='evening')
+        self.request(self.owner,'/api/shifts',{'id':evening['id'],'employee_id':evening['employee_id'],
+                     'store_id':1,'date':'2026-11-02','start_time':'21:00','end_time':'04:00',
+                     'break_minutes':30,'notes':'Manager adjusted','status':'draft'},self.csrf)
+        self.assertEqual(self.request(self.owner,'/api/schedule/generate-week',
+                         {'store_id':1,'week_start':'2026-11-02'},self.csrf)['created'],0)
+
+    def test_manual_evening_assignment_fills_one_of_three_slots(self):
+        employees=[self.create_employee([1]) for _ in range(3)]
+        plan={'store_id':1,'open_time':'10:00','close_time':'04:00','slot_minutes':480,
+              'break_minutes':30,'staffing':[3,0,0,0,0,0,0],
+              'templates':[{'id':'evening','name':'Evening','start_time':'20:00','end_time':'04:00',
+                 'break_minutes':30,'staffing':[3,0,0,0,0,0,0]}]}
+        self.request(self.owner,'/api/store-staffing',plan,self.csrf)
+        self.request(self.owner,'/api/shifts',{'employee_id':employees[0],'store_id':1,
+                     'date':'2026-11-02','start_time':'20:00','end_time':'04:00'},self.csrf)
+        estimate=self.request(self.owner,'/api/schedule/estimate?store_id=1&week_start=2026-11-02')
+        self.assertEqual(estimate['unfilled_slots'],2)
+        created=self.request(self.owner,'/api/schedule/generate-week',
+                             {'store_id':1,'week_start':'2026-11-02'},self.csrf)
+        self.assertEqual(created['created'],2)
+        self.assertEqual(self.request(self.owner,'/api/schedule/estimate?store_id=1&week_start=2026-11-02')['unfilled_slots'],0)
+
+    def test_overnight_validation_and_next_week_overlap(self):
+        employee=self.create_employee([1])
+        self.request(self.owner,'/api/store-staffing',{'store_id':1,'open_time':'10:00',
+                     'close_time':'04:00','slot_minutes':480,'break_minutes':0,
+                     'staffing':[0]*7,'templates':[{'id':'late','name':'Late','start_time':'01:00',
+                     'end_time':'04:00','break_minutes':0,'staffing':[0]*7}]},self.csrf)
+        bad={'store_id':1,'open_time':'10:00','close_time':'04:00','slot_minutes':480,
+             'break_minutes':0,'staffing':[0]*7,'templates':[{'id':'bad','name':'Outside hours',
+             'start_time':'07:00','end_time':'13:00','break_minutes':0,'staffing':[0]*7}]}
+        self.request(self.owner,'/api/store-staffing',bad,self.csrf,expect=400)
+        sunday={'employee_id':employee,'store_id':1,'date':'2026-11-01',
+                'start_time':'20:00','end_time':'04:00'}
+        self.request(self.owner,'/api/shifts',sunday,self.csrf)
+        self.request(self.owner,'/api/shifts',{**sunday,'date':'2026-11-02',
+                     'start_time':'02:00','end_time':'05:00'},self.csrf,expect=400)
+
+    def test_legacy_overnight_generation_wraps_clock_times(self):
+        self.create_employee([1])
+        self.request(self.owner,'/api/store-staffing',{'store_id':1,'open_time':'20:00',
+                     'close_time':'04:00','slot_minutes':480,'break_minutes':0,
+                     'staffing':[1,0,0,0,0,0,0]},self.csrf)
+        self.assertEqual(self.request(self.owner,'/api/schedule/generate-week',
+                         {'store_id':1,'week_start':'2026-11-02'},self.csrf)['created'],1)
+        shift=self.request(self.owner,'/api/data')['shifts'][0]
+        self.assertEqual((shift['start_time'],shift['end_time']),('20:00','04:00'))
+
     def test_preavailability_database_schema_is_upgraded_in_place(self):
         original_file=app.DB_FILE
         try:

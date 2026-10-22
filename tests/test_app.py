@@ -140,6 +140,90 @@ class ShiftLedgerTests(unittest.TestCase):
             self.assertIsNotNone(con.execute('SELECT deleted_at FROM time_entries WHERE id=?',(record,)).fetchone()[0])
             self.assertGreaterEqual(con.execute('SELECT count(*) FROM audit_log').fetchone()[0],2)
 
+    def test_owner_can_create_store_and_manager_login_end_to_end(self):
+        store=self.create_store('Northside Market')
+        store_names=[s['name'] for s in self.request(self.owner,'/api/data')['stores']]
+        self.assertIn('Northside Market',store_names)
+        result=self.request(self.owner,'/api/users',{'username':'north_manager','password':'very-secure-password-001',
+                            'store_ids':[store]},self.csrf)
+        accounts=self.request(self.owner,'/api/users')
+        self.assertIn(result['id'],[u['id'] for u in accounts['users']])
+        manager=self.client()
+        csrf=self.login(manager,'north_manager','very-secure-password-001')['csrf']
+        self.assertEqual([s['id'] for s in self.request(manager,'/api/data')['stores']],[store])
+        # Store and login creation must remain restricted to the owner.
+        self.request(manager,'/api/users',{'username':'unauthorized','password':'very-secure-password-222',
+                     'store_ids':[store]},csrf,expect=403)
+        self.request(manager,'/api/stores',{'name':'Unauthorized Store'},csrf,expect=403)
+
+    def test_week_generation_is_draft_editable_idempotent_and_estimated(self):
+        store=1
+        employees=[self.create_employee([store], rate='20.00') for _ in range(3)]
+        plan={'store_id':store,'open_time':'09:00','close_time':'21:00','slot_minutes':480,
+              'break_minutes':30,'staffing':[2,2,2,2,2,0,0]}
+        self.request(self.owner,'/api/store-staffing',plan,self.csrf)
+        # Existing manual shift occupies a slot and must not be overwritten.
+        prior=self.request(self.owner,'/api/shifts',{'employee_id':employees[0],'store_id':store,
+                'date':'2026-11-02','start_time':'10:00','end_time':'16:00','break_minutes':0,
+                'status':'published','notes':'Set by manager'},self.csrf)['id']
+        result=self.request(self.owner,'/api/schedule/generate-week',
+                            {'store_id':store,'week_start':'2026-11-02'},self.csrf)
+        self.assertEqual(result['created'],9)
+        self.assertEqual(result['unfilled'],[])
+        self.assertEqual(self.request(self.owner,'/api/schedule/generate-week',
+                          {'store_id':store,'week_start':'2026-11-02'},self.csrf)['created'],0)
+        shifts=self.request(self.owner,'/api/data')['shifts']
+        self.assertEqual(len(shifts),10)
+        original=next(s for s in shifts if s['id']==prior)
+        self.assertEqual(original['notes'],'Set by manager')
+        self.assertEqual(original['status'],'published')
+        self.assertEqual(original['generated'],0)
+        self.assertTrue(all(s['status']=='draft' and s['generated']==1 for s in shifts if s['id']!=prior))
+        weekly=self.request(self.owner,'/api/schedule/estimate?store_id=1&week_start=2026-11-02')
+        self.assertEqual(weekly['shift_count'],10)
+        self.assertEqual(weekly['staffing_target'],10)
+        self.assertEqual(weekly['unfilled_slots'],0)
+        self.assertEqual(weekly['planned_minutes'],9*450+360)
+        self.assertEqual(weekly['estimated_base_cents'],9*15000+12000)
+        generated=next(s for s in shifts if s['generated'])
+        self.request(self.owner,'/api/shifts',{'id':generated['id'],'employee_id':generated['employee_id'],
+                'store_id':store,'date':generated['shift_date'],'start_time':'11:00','end_time':'16:00',
+                'break_minutes':0,'status':'draft','notes':'Manual change'},self.csrf)
+        self.assertEqual(next(s for s in self.request(self.owner,'/api/data')['shifts'] if s['id']==generated['id'])['notes'],'Manual change')
+        self.assertEqual(self.request(self.owner,'/api/schedule/generate-week',
+                          {'store_id':store,'week_start':'2026-11-02'},self.csrf)['created'],0)
+
+    def test_generation_staff_shortage_and_manager_store_boundaries(self):
+        store2=self.create_store('Two')
+        employee=self.create_employee([1,store2])
+        self.request(self.owner,'/api/store-staffing',{'store_id':1,'open_time':'08:00','close_time':'17:00',
+                     'slot_minutes':480,'break_minutes':0,'staffing':[2,0,0,0,0,0,0]},self.csrf)
+        self.request(self.owner,'/api/users',{'username':'manager2','password':'very-secure-password-789',
+                     'store_ids':[1]},self.csrf)
+        manager=self.client()
+        csrf=self.login(manager,'manager2','very-secure-password-789')['csrf']
+        self.request(manager,'/api/schedule/generate-week',{'store_id':store2,'week_start':'2026-11-02'},csrf,expect=400)
+        self.request(manager,'/api/store-staffing',{'store_id':store2,'open_time':'09:00','close_time':'17:00',
+                     'slot_minutes':480,'break_minutes':0,'staffing':[1]*7},csrf,expect=400)
+        result=self.request(manager,'/api/schedule/generate-week',
+                            {'store_id':1,'week_start':'2026-11-02'},csrf)
+        self.assertEqual(result['created'],1)
+        self.assertEqual(result['unfilled'],[{'date':'2026-11-02','remaining':1}])
+        self.request(manager,'/api/schedule/estimate?store_id='+str(store2)+'&week_start=2026-11-02',expect=400)
+        self.request(self.owner,'/api/schedule/generate-week',{'store_id':1,'week_start':'2026-11-03'},self.csrf,expect=400)
+
+    def test_existing_database_migrates_without_losing_login_or_shifts(self):
+        emp=self.create_employee([1])
+        shift=self.request(self.owner,'/api/shifts',{'employee_id':emp,'store_id':1,'date':'2026-11-03',
+                     'start_time':'09:00','end_time':'17:00','break_minutes':30},self.csrf)['id']
+        with app.db() as con:
+            con.execute('UPDATE stores SET open_time=? WHERE id=1',('08:00',))
+        app.init_db()
+        self.assertEqual(self.request(self.owner,'/api/session')['username'],'admin')
+        data=self.request(self.owner,'/api/data')
+        self.assertEqual(data['shifts'][0]['id'],shift)
+        self.assertEqual(data['stores'][0]['open_time'],'08:00')
+
 
 if __name__ == '__main__':
     unittest.main()

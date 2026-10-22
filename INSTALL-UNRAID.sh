@@ -12,6 +12,13 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 if [ ! -f .env ]; then
+  if [ -f /mnt/user/appdata/shiftledger/data/shiftledger.sqlite3 ]; then
+    echo 'An existing ShiftLedger database was found, but this source folder has no .env.'
+    echo 'A newly generated admin password will NOT unlock an existing database.'
+    echo 'Instead, run UPGRADE-UNRAID.sh with the previous install-folder path to preserve logins.'
+    echo 'Nothing was changed.'
+    exit 1
+  fi
   umask 077
   if command -v openssl >/dev/null 2>&1; then
     initial_password=$(openssl rand -hex 18)

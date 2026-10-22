@@ -81,6 +81,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS stores (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL, location TEXT NOT NULL DEFAULT '',
             color TEXT NOT NULL DEFAULT '#3c8d82', active INTEGER NOT NULL DEFAULT 1,
+            open_time TEXT NOT NULL DEFAULT '09:00', close_time TEXT NOT NULL DEFAULT '17:00',
+            slot_minutes INTEGER NOT NULL DEFAULT 480, break_minutes INTEGER NOT NULL DEFAULT 30,
+            staffing_json TEXT NOT NULL DEFAULT '[1,1,1,1,1,1,1]',
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS employees (
@@ -99,7 +102,8 @@ def init_db():
             store_id INTEGER NOT NULL REFERENCES stores(id), shift_date TEXT NOT NULL,
             start_time TEXT NOT NULL, end_time TEXT NOT NULL,
             break_minutes INTEGER NOT NULL DEFAULT 0, notes TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'draft', deleted_at TEXT, created_at TEXT NOT NULL
+            status TEXT NOT NULL DEFAULT 'draft', generated INTEGER NOT NULL DEFAULT 0,
+            deleted_at TEXT, created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS shifts_date_idx ON shifts(shift_date, store_id);
         CREATE TABLE IF NOT EXISTS time_entries (
@@ -126,6 +130,18 @@ def init_db():
         store_columns = [row[1] for row in con.execute("PRAGMA table_info(employee_stores)")]
         if "rate_cents" not in store_columns:
             con.execute("ALTER TABLE employee_stores ADD COLUMN rate_cents INTEGER")
+        store_columns = [row[1] for row in con.execute("PRAGMA table_info(stores)")]
+        for column, ddl in (
+            ("open_time", "TEXT NOT NULL DEFAULT '09:00'"),
+            ("close_time", "TEXT NOT NULL DEFAULT '17:00'"),
+            ("slot_minutes", "INTEGER NOT NULL DEFAULT 480"),
+            ("break_minutes", "INTEGER NOT NULL DEFAULT 30"),
+            ("staffing_json", "TEXT NOT NULL DEFAULT '[1,1,1,1,1,1,1]'"),
+        ):
+            if column not in store_columns:
+                con.execute(f"ALTER TABLE stores ADD COLUMN {column} {ddl}")
+        if "generated" not in [row[1] for row in con.execute("PRAGMA table_info(shifts)")]:
+            con.execute("ALTER TABLE shifts ADD COLUMN generated INTEGER NOT NULL DEFAULT 0")
         existing = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if not existing:
             username = os.environ.get("ADMIN_USERNAME", "admin").strip()
@@ -342,6 +358,115 @@ def week_monday(d):
     return d - timedelta(days=d.weekday())
 
 
+def staffing_settings(body):
+    opening = require_string(body.get("open_time", ""), "Opening time", 5)
+    closing = require_string(body.get("close_time", ""), "Closing time", 5)
+    open_min, close_min = as_time(opening), as_time(closing)
+    if close_min <= open_min:
+        raise InputError("Closing time must be later than opening time (overnight templates are not supported yet)")
+    duration = integer_range(body.get("slot_minutes"), "Shift length", 30, 1380)
+    pause = integer_range(body.get("break_minutes"), "Unpaid break", 0, 600)
+    if duration > close_min - open_min or pause >= duration:
+        raise InputError("Shift length must fit store hours and exceed the unpaid break")
+    staffing = body.get("staffing")
+    if not isinstance(staffing, list) or len(staffing) != 7:
+        raise InputError("Set staffing counts for all seven weekdays")
+    staffing = [integer_range(count, "Daily staffing count", 0, 20) for count in staffing]
+    return opening, closing, duration, pause, json.dumps(staffing)
+
+
+def schedule_estimate(user, week_start, store_filter=None):
+    monday_date = as_date(week_start)
+    if monday_date.weekday() != 0:
+        raise InputError("Week start must be a Monday")
+    last = (monday_date + timedelta(days=6)).isoformat()
+    start = monday_date.isoformat()
+    if store_filter:
+        authorize_store(user, store_filter)
+    allowed = user["store_ids"] if user["role"] != "owner" else None
+    with db() as con:
+        shifts = rows(con, """SELECT sh.*,COALESCE(es.rate_cents,e.rate_cents) AS hourly_rate_cents
+            FROM shifts sh JOIN employees e ON e.id=sh.employee_id
+            LEFT JOIN employee_stores es ON es.employee_id=sh.employee_id AND es.store_id=sh.store_id
+            WHERE sh.deleted_at IS NULL AND sh.shift_date BETWEEN ? AND ?""", (start, last))
+        stores = rows(con, "SELECT id,staffing_json FROM stores WHERE active=1")
+    if allowed is not None:
+        shifts = [s for s in shifts if s["store_id"] in allowed]
+        stores = [s for s in stores if s["id"] in allowed]
+    if store_filter:
+        shifts = [s for s in shifts if s["store_id"] == store_filter]
+        stores = [s for s in stores if s["id"] == store_filter]
+    minutes = sum(shift_minutes(s["start_time"], s["end_time"], s["break_minutes"]) for s in shifts)
+    wages = sum(money_round(Decimal(shift_minutes(s["start_time"], s["end_time"], s["break_minutes"]))
+                            * Decimal(s["hourly_rate_cents"]) / Decimal(60)) for s in shifts)
+    desired = sum(sum(json.loads(s["staffing_json"])) for s in stores)
+    return {"week_start": start, "week_end": last, "store_id": store_filter,
+            "shift_count": len(shifts), "planned_minutes": minutes, "estimated_base_cents": wages,
+            "staffing_target": desired, "unfilled_slots": max(0, desired-len(shifts)),
+            "draft_count": sum(s["status"] == "draft" for s in shifts)}
+
+
+def generate_week(user, store_id, week_start):
+    start = as_date(week_start)
+    if start.weekday() != 0:
+        raise InputError("Week start must be a Monday")
+    authorize_store(user, store_id)
+    week_end = (start + timedelta(days=6)).isoformat()
+    with db() as con:
+        with con:
+            store = ensure_record(con, "stores", store_id, True)
+            needs = json.loads(store["staffing_json"])
+            employees = rows(con, """SELECT e.id,e.name FROM employees e JOIN employee_stores es
+                                     ON es.employee_id=e.id WHERE es.store_id=? AND e.active=1
+                                     ORDER BY e.id""", (store_id,))
+            existing = rows(con, """SELECT employee_id,store_id,shift_date,start_time,end_time,break_minutes
+                                    FROM shifts WHERE deleted_at IS NULL AND shift_date BETWEEN ? AND ?""",
+                            (start.isoformat(), week_end))
+            total_mins = {}
+            day_people = {}
+            day_store_count = {}
+            for sh in existing:
+                emp = sh["employee_id"]
+                total_mins[emp] = total_mins.get(emp, 0) + shift_minutes(sh["start_time"], sh["end_time"], sh["break_minutes"])
+                day_people.setdefault(sh["shift_date"], set()).add(emp)
+                if sh["store_id"] == store_id:
+                    day_store_count[sh["shift_date"]] = day_store_count.get(sh["shift_date"], 0) + 1
+            open_min, close_min = as_time(store["open_time"]), as_time(store["close_time"])
+            span = close_min - open_min
+            duration = min(store["slot_minutes"], span)
+            pause = store["break_minutes"]
+            if span <= 0 or duration <= pause:
+                raise InputError("Update store staffing hours before generating the schedule")
+            paid_mins = duration - pause
+            created, unfilled = [], []
+            for weekday in range(7):
+                day = (start + timedelta(days=weekday)).isoformat()
+                needed = max(0, needs[weekday] - day_store_count.get(day, 0))
+                busy = day_people.setdefault(day, set())
+                for slot in range(needed):
+                    eligible = [emp for emp in employees if emp["id"] not in busy and total_mins.get(emp["id"], 0) + paid_mins <= 2400]
+                    if not eligible:
+                        unfilled.append({"date": day, "remaining": needed - slot})
+                        break
+                    emp = min(eligible, key=lambda item: (total_mins.get(item["id"], 0), item["id"]))
+                    # Stagger shifts across the operating hours when multiple people are needed.
+                    offset = 0 if needs[weekday] <= 1 else round((span-duration) *
+                                     (day_store_count.get(day, 0) + slot) / max(1, needs[weekday]-1))
+                    start_min = open_min + offset
+                    start_time = f"{start_min//60:02d}:{start_min%60:02d}"
+                    end_min = start_min + duration
+                    end_time = f"{end_min//60:02d}:{end_min%60:02d}"
+                    rid = con.execute("""INSERT INTO shifts(employee_id,store_id,shift_date,start_time,end_time,
+                        break_minutes,notes,status,generated,created_at) VALUES(?,?,?,?,?,?,'Auto-generated; review before publishing','draft',1,?)""",
+                        (emp["id"], store_id, day, start_time, end_time, pause, utc_now())).lastrowid
+                    total_mins[emp["id"]] = total_mins.get(emp["id"], 0) + paid_mins
+                    busy.add(emp["id"])
+                    created.append(rid)
+            audit(con, user["username"], "generate_week", "store", store_id,
+                  {"week_start": start.isoformat(), "created_shift_ids": created, "unfilled": unfilled})
+    return {"created": len(created), "unfilled": unfilled, "week_start": start.isoformat()}
+
+
 def money_round(num):
     return int(Decimal(num).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
@@ -400,7 +525,7 @@ def calculate_payroll(start, end, store_filter=None):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ShiftLedger/1.0"
+    server_version = "ShiftLedger/1.1"
 
     def log_message(self, fmt, *args):
         print("[%s] %s %s" % (utc_now(), self.client_address[0], fmt % args), flush=True)
@@ -412,7 +537,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "same-origin")
-        self.send_header("Cache-Control", "no-store" if self.path.startswith("/api/") else "public, max-age=3600")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'")
         if cookie:
             self.send_header("Set-Cookie", cookie)
@@ -479,7 +604,7 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         try:
             if path == "/api/health" and method == "GET":
-                return self.json(200, {"ok": True, "version": "1.0.0"})
+                return self.json(200, {"ok": True, "version": "1.1.0"})
             if method != "GET" and not self.same_origin():
                 return self.json(403, {"error": "Cross-origin request rejected"})
             if path == "/api/login" and method == "POST":
@@ -524,6 +649,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, {"ok": True}, self.cookie_header("", 0))
             if path == "/api/data" and method == "GET":
                 return self.json(200, list_data(user))
+            if path == "/api/schedule/estimate" and method == "GET":
+                store = positive_id(params["store_id"][0], "store") if params.get("store_id") else None
+                return self.json(200, schedule_estimate(user, params.get("week_start", [""])[0], store))
+            if path == "/api/schedule/generate-week" and method == "POST":
+                body = self.read_json()
+                store = positive_id(body.get("store_id"), "store")
+                return self.json(200, generate_week(user, store, body.get("week_start")))
+            if path == "/api/store-staffing" and method == "POST":
+                body = self.read_json()
+                store = positive_id(body.get("store_id"), "store")
+                authorize_store(user, store)
+                opening, closing, duration, pause, staffing = staffing_settings(body)
+                with db() as con:
+                    with con:
+                        ensure_record(con, "stores", store, True)
+                        con.execute("""UPDATE stores SET open_time=?,close_time=?,slot_minutes=?,
+                                      break_minutes=?,staffing_json=? WHERE id=?""",
+                                    (opening, closing, duration, pause, staffing, store))
+                        audit(con, user["username"], "set_staffing", "store", store, body)
+                return self.json(200, {"ok": True})
             if path == "/api/payroll" and method == "GET":
                 owner_required(user)
                 store = positive_id(params["store_id"][0], "store") if params.get("store_id") and params["store_id"][0] else None

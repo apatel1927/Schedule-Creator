@@ -1,7 +1,7 @@
 /* ShiftLedger browser UI — no external scripts or third-party services. */
 const state = {
   session: null, data: null, accounts: null, view: 'schedule',
-  store: 'all', mode: 'month', cursor: new Date(),
+  store: 'all', mode: 'week', cursor: new Date(), estimate: null,
   payrollStart: '', payrollEnd: '', payroll: null, payrollStore: 'all'
 };
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -47,11 +47,22 @@ function logoutLocal() {
   state.session=null; state.data=null;$('#app').classList.add('hidden');$('#login-screen').classList.remove('hidden');
   $('#login-pass').value='';
 }
-async function loadData() { state.data=await api('/api/data'); }
+async function loadData() {
+  state.data=await api('/api/data');
+  if(!state.data.stores.some(s=>String(s.id)===String(state.store))) {
+    state.store=String(state.data.stores.find(s=>s.active)?.id||'all');
+  }
+}
+async function loadEstimate() {
+  const mondayDay=localDay(monday(state.cursor));
+  const q=new URLSearchParams({week_start:mondayDay});
+  if(state.store!=='all')q.set('store_id',state.store);
+  state.estimate=await api('/api/schedule/estimate?'+q);
+}
 async function start() {
   $('#header-today').textContent=new Date().toLocaleDateString(undefined,{weekday:'short',month:'long',day:'numeric',year:'numeric'});
   const today=new Date(); state.payrollEnd=localDay(today); state.payrollStart=localDay(addDays(today,-13));
-  try {const session=await api('/api/session'); if (!session.authenticated) return;state.session=session;await loadData();showApp();}
+  try {const session=await api('/api/session'); if (!session.authenticated) return;state.session=session;await loadData();await loadEstimate();showApp();}
   catch(e){toast(e.message,true);}
 }
 function showApp() {
@@ -108,9 +119,15 @@ function renderCalendar() {
 }
 function renderSchedule() {
   const range=getRange();const count=visibleShifts().filter(s=>s.shift_date>=localDay(range.first)&&s.shift_date<=localDay(range.last)).length;
-  return heading('PLAN WITH CONFIDENCE','Team schedule','Pick a date, assign an employee and build schedules as far ahead as you like.',`<button class="btn" data-action="bulk">↻ Repeating shifts</button><button class="btn primary" data-action="new-shift">＋ Add shift</button>`)+
-  `<section class="card calendar-card"><div class="calendar-toolbar"><div class="toolbar-group"><div class="calendar-month-title">${esc(range.label)}</div><div class="calendar-nav"><button class="icon-btn" data-action="prev" title="Previous">‹</button><button class="icon-btn" data-action="today" title="Today">◎</button><button class="icon-btn" data-action="next" title="Next">›</button></div></div><div class="toolbar-group">${commonStoreSelector()}<div class="segmented"><button data-action="calendar-week" class="${state.mode==='week'?'active':''}">Week</button><button data-action="calendar-month" class="${state.mode==='month'?'active':''}">Month</button></div></div></div>${renderCalendar()}<div class="calendar-footer"><div class="legend"><span><i></i> Published</span><span><i class="draft"></i> Draft</span></div><span>${count} shift${count===1?'':'s'} in this view</span></div></section>
-  <div class="filter-strip" style="margin-top:15px"><span class="tab-note">Tip: click any shift to edit it. Use repeating shifts to fill selected weekdays across future weeks.</span><div class="spacer"></div><button class="btn" data-action="publish-range">✓ Publish visible dates</button></div>`;
+  const estimate=state.estimate, week=localDay(monday(state.cursor));
+  const help=state.store==='all'?'Select one store above to auto-generate shifts for that location.':'Generate draft shifts from your store staffing setup, then click any shift to change the assigned employee or hours.';
+  const setupActions=allStores().length?`<button class="btn" data-action="staffing">⚙ Staffing setup</button><button class="btn primary" data-action="generate-week">✦ Generate week</button>`:(isOwner()?'<button class="btn primary" data-view="stores">＋ Create a store</button>':'');
+  return heading('PLAN WITH CONFIDENCE','Team schedule','Auto-build each week from assigned employees, then adjust shifts manually.',`<button class="btn" data-action="bulk">↻ Repeating shifts</button><button class="btn" data-action="new-shift">＋ Add shift</button>`)+
+  `<div class="filter-strip"><span class="filter-label">SCHEDULE STORE</span>${commonStoreSelector()}<span class="tab-note">${esc(help)}</span><div class="spacer"></div>${setupActions}</div>
+  <div class="stats-grid">${statistic('Week of',shortDate(week),'Monday–Sunday','▦')}${statistic('Scheduled shifts',estimate?.shift_count??'—',`${estimate?.draft_count??0} drafts this week`,'♙')}${statistic('Scheduled hours',estimate?hours(estimate.planned_minutes):'—','Planned paid hours, less unpaid breaks','◷','blue')}${statistic('Estimated weekly wages',estimate?money(estimate.estimated_base_cents):'—','Straight-time wages only; excludes overtime, taxes & extras','＄','purple')}</div>
+  ${estimate?.unfilled_slots>0?`<div class="manager-permissions"><strong>${estimate.unfilled_slots} staffing slots not scheduled.</strong> Generate the week to fill openings based on the store template and available employees. Shift changes are never overwritten.</div>`:''}`+
+  `<section class="card calendar-card"><div class="calendar-toolbar"><div class="toolbar-group"><div class="calendar-month-title">${esc(range.label)}</div><div class="calendar-nav"><button class="icon-btn" data-action="prev" title="Previous">‹</button><button class="icon-btn" data-action="today" title="Today">◎</button><button class="icon-btn" data-action="next" title="Next">›</button></div></div><div class="toolbar-group"><div class="segmented"><button data-action="calendar-week" class="${state.mode==='week'?'active':''}">Week</button><button data-action="calendar-month" class="${state.mode==='month'?'active':''}">Month</button></div></div></div>${renderCalendar()}<div class="calendar-footer"><div class="legend"><span><i></i> Published</span><span><i class="draft"></i> Draft</span></div><span>${count} shift${count===1?'':'s'} in this view</span></div></section>
+  <div class="filter-strip" style="margin-top:15px"><span class="tab-note">Estimate is based on scheduled shifts at current store rates. Actual payroll includes separately logged shopping, pulling, and other paid tasks.</span><div class="spacer"></div><button class="btn" data-action="publish-range">✓ Publish visible dates</button></div>`;
 }
 function renderEmployees() {
   const employees=state.data.employees.filter(e=>state.store==='all'||state.data.employee_stores.some(es=>es.employee_id===e.id&&es.store_id===Number(state.store)));
@@ -137,8 +154,10 @@ function renderPayroll() {
 }
 function renderStores() {
   const cards=allStores().map(s=>{const people=state.data.employee_stores.filter(e=>e.store_id===s.id).length;
-    return `<div class="card store-card"><div class="store-head"><div class="store-mark" style="background:${esc(s.color)}">⌂</div>${badge(s.active?'Active':'Inactive',s.active?'':'gray')}</div><h3>${esc(s.name)}</h3><p>${esc(s.location||'No location details added')}</p><div class="store-meta"><span>${people} assigned employee${people===1?'':'s'}</span>${isOwner()?`<button class="text-btn" data-action="edit-store" data-id="${s.id}">Edit store →</button>`:''}</div></div>`}).join('');
-  return heading('ONE HOME FOR EVERY LOCATION','Your stores','Set up your locations and schedule each team independently.',isOwner()?'<button class="btn primary" data-action="new-store">＋ Add store</button>':'')+`<div class="store-grid">${cards||empty('No stores available','Ask the owner to assign you a store.')}</div>`;
+    return `<div class="card store-card"><div class="store-head"><div class="store-mark" style="background:${esc(s.color)}">⌂</div>${badge(s.active?'Active':'Inactive',s.active?'':'gray')}</div><h3>${esc(s.name)}</h3><p>${esc(s.location||'No location details added')}</p><div class="store-meta"><span>${people} assigned employee${people===1?'':'s'}</span>${isOwner()?`<button class="text-btn" data-action="edit-store" data-id="${s.id}">Edit store →</button>`:''}<button class="text-btn" data-action="staffing" data-store="${s.id}">Staffing setup →</button></div></div>`}).join('');
+  return heading('ONE HOME FOR EVERY LOCATION','Your stores','Set up locations and assign each team its weekly staffing plan.',isOwner()?'<button class="btn primary" data-action="new-store">＋ Add store</button>':'')+
+    (isOwner()?'<div class="manager-permissions">Signed in as <strong>Owner</strong>. You can create stores here, then create manager logins under <strong>Managers & access</strong> and assign each manager to one or more stores.</div>':'<div class="manager-permissions">You are signed in as a <strong>Manager</strong>. Only the owner can add stores and login accounts. You can edit the staffing setup for stores assigned to you.</div>')+
+    `<div class="store-grid">${cards||empty('No stores available',isOwner()?'Create your first store.':'Ask the owner to assign you a store.',isOwner()?'new-store':'','Add store')}</div>`;
 }
 function renderManagers() {
   if(!isOwner()) return '';
@@ -152,7 +171,7 @@ function renderManagers() {
 
 function openModal(title, markup) {
   $('#modal-title').textContent=title;
-  $('#modal-content').innerHTML=`<div class="modal-body">${markup}</div>`;
+  $('#modal-content').innerHTML=`<div class="modal-body"><div id="modal-error" class="form-error hidden" role="alert"></div>${markup}</div>`;
   $('#modal-root').classList.remove('hidden');
   document.body.style.overflow='hidden';
   setTimeout(()=>$('#modal-content input:not([type=hidden]),#modal-content select')?.focus(),0);
@@ -202,6 +221,13 @@ function showStore(s) {
   const colors=['#3c8d82','#397bb2','#b57747','#745fc5','#c05f76','#337f66'];
   openModal(s?'Edit store':'Add store',`<form id="store-form"><input type="hidden" name="id" value="${s?.id||''}">${input('name','Store name',s?.name||'','text','required maxlength="100" placeholder="Downtown Store"')}${input('location','Address / location (optional)',s?.location||'','text','maxlength="200" placeholder="City, state or address"')}<label>Store color</label><div class="check-row">${colors.map(c=>`<label style="border-color:${c}50"><input name="color" type="radio" value="${c}" ${(s?.color||'#3c8d82')===c?'checked':''}><span style="background:${c};width:14px;height:14px;border-radius:50%;display:inline-block"></span></label>`).join('')}</div>${s?`<div class="form-checkbox"><input id="active-store" name="active" type="checkbox" ${s.active?'checked':''}><label for="active-store">Active store</label></div>`:''}${footer(s?'Save store':'Create store')}</form>`);
 }
+function showStaffing(storeId) {
+  const store=getStore(storeId)||(state.store==='all'?allStores().find(s=>s.active):getStore(state.store));
+  if(!store)return toast('Create a store before setting staffing hours',true);
+  let staffing;try{staffing=JSON.parse(store.staffing_json);}catch{staffing=[1,1,1,1,1,1,1];}
+  const weekday=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+  openModal(`Staffing plan · ${store.name}`,`<form id="staffing-form"><input type="hidden" name="store_id" value="${store.id}"><p class="tab-note">Set how many employees are needed each day. The generator assigns available store employees to draft shifts, up to 40 planned hours per employee per week.</p><div class="two-col"><div>${input('open_time','Store opens',store.open_time||'09:00','time','required')}</div><div>${input('close_time','Store closes',store.close_time||'17:00','time','required')}</div></div><div class="two-col"><div>${input('slot_hours','Hours per shift',(store.slot_minutes/60).toFixed(2),'number','min="0.5" max="23" step="0.25" required')}</div><div>${input('break_minutes','Unpaid break (minutes)',store.break_minutes,'number','min="0" max="600" required')}</div></div><label>Employees needed each day</label><div class="staffing-days">${weekday.map((name,i)=>`<label>${name}<input type="number" name="day_${i}" min="0" max="20" step="1" required value="${Number(staffing[i]??1)}"></label>`).join('')}</div><p class="helper">Use 0 for days the store is closed. Generating a week never deletes or replaces existing shifts. Overnight opening hours are not supported in this version.</p>${footer('Save staffing plan')}</form>`);
+}
 function showEntry(e) {
   if(!allStores().length){toast('No accessible stores',true);return;}
   const store=e?.store_id||(state.store==='all'?allStores().find(s=>s.active)?.id:Number(state.store));
@@ -211,20 +237,21 @@ function showEntry(e) {
 }
 function showManager(u) {
   if(!isOwner())return;
-  const ids=u?state.accounts.user_stores.filter(x=>x.user_id===u.id).map(x=>x.store_id):[];
-  openModal(u?'Edit manager':'Create manager login',`<form id="manager-form"><input type="hidden" name="id" value="${u?.id||''}">${input('username','Login username',u?.username||'','text','required autocomplete="off" maxlength="80"')}${input('password',u?'New password (leave blank to keep current)':'Initial password (12+ characters)','', 'password',`${u?'':'required'} minlength="12" autocomplete="new-password"`)}<label>Stores this manager can access</label>${storeChecks(ids)}${u?`<div class="form-checkbox"><input type="checkbox" id="manager-active" name="active" ${u.active?'checked':''}><label for="manager-active">Account enabled</label></div>`:''}<p class="tab-note">Managers can edit schedules, recorded hours and hourly rates at their assigned stores. They cannot see owner payroll reports or manage logins.</p>${footer(u?'Save manager':'Create login')}</form>`);
+  const ids=u?state.accounts.user_stores.filter(x=>x.user_id===u.id).map(x=>x.store_id):[allStores().find(s=>s.active)?.id].filter(Boolean);
+  if(!allStores().some(s=>s.active))return toast('Create an active store before adding a manager login',true);
+  openModal(u?'Edit manager':'Create manager login',`<form id="manager-form"><input type="hidden" name="id" value="${u?.id||''}">${input('username','Login username',u?.username||'','text','required autocomplete="username" maxlength="80" pattern="[a-zA-Z0-9_-]+" title="Letters, numbers, hyphens and underscores only"')}${input('password',u?'New password (leave blank to keep current)':'Initial password (at least 12 characters)','', 'password',`${u?'':'required'} minlength="12" autocomplete="new-password"`)}<label>Stores this manager can access (select at least one)</label>${storeChecks(ids)}${u?`<div class="form-checkbox"><input type="checkbox" id="manager-active" name="active" ${u.active?'checked':''}><label for="manager-active">Account enabled</label></div>`:''}<p class="tab-note">Give the manager this username and password to sign in on the normal login page. Managers can edit schedules, actual hours and hourly rates for assigned stores; owner-only reports and account administration remain restricted.</p>${footer(u?'Save manager':'Create login')}</form>`);
 }
 function showChangePassword() {
   openModal('Change my password',`<form id="password-form">${input('current_password','Current password','','password','required autocomplete="current-password"')}${input('new_password','New password (at least 12 characters)','','password','required minlength="12" autocomplete="new-password"')}${footer('Change password')}</form>`);
 }
 
-async function refresh() {await loadData();if(state.view==='managers'&&isOwner())await loadAccounts();if(state.view==='payroll'&&isOwner())await loadPayroll();render();}
+async function refresh() {await loadData();await loadEstimate();if(state.view==='managers'&&isOwner())await loadAccounts();if(state.view==='payroll'&&isOwner())await loadPayroll();render();}
 async function loadAccounts() {state.accounts=await api('/api/users');}
 async function loadPayroll() {const q=new URLSearchParams({start:state.payrollStart,end:state.payrollEnd});if(state.payrollStore!=='all')q.set('store_id',state.payrollStore);state.payroll=await api('/api/payroll?'+q);}
 async function setView(view) {
   if ((view==='payroll'||view==='managers')&&!isOwner())return;
   state.view=view;
-  try {if(view==='payroll')await loadPayroll();if(view==='managers')await loadAccounts();render();}
+  try {if(view==='payroll')await loadPayroll();if(view==='managers')await loadAccounts();if(view==='schedule')await loadEstimate();render();}
   catch(e){toast(e.message,true);render();}
 }
 async function handleAction(action,btn) {
@@ -238,14 +265,23 @@ async function handleAction(action,btn) {
   if(action==='edit-rate')return showRate(Number(btn.dataset.employee),Number(btn.dataset.store));
   if(action==='new-store')return showStore();
   if(action==='edit-store')return showStore(getStore(id));
+  if(action==='staffing')return showStaffing(Number(btn.dataset.store)||undefined);
+  if(action==='generate-week'){
+    if(state.store==='all')return toast('Select a single store to generate its weekly schedule',true);
+    const result=await api('/api/schedule/generate-week',{store_id:Number(state.store),week_start:localDay(monday(state.cursor))});
+    await refresh();
+    if(result.unfilled.length){const amount=result.unfilled.reduce((sum,day)=>sum+day.remaining,0);toast(`${result.created} draft shifts created; ${amount} unfilled slots. Add staff or edit your plan.`,true);}
+    else toast(`${result.created} draft shifts created. Review and publish when ready.`);
+    return;
+  }
   if(action==='new-entry')return showEntry();
   if(action==='edit-entry')return showEntry(state.data.entries.find(x=>x.id===id));
   if(action==='new-manager')return showManager();
   if(action==='edit-manager')return showManager(state.accounts?.users.find(x=>x.id===id));
   if(action==='change-password')return showChangePassword();
-  if(action==='prev'||action==='next'){state.cursor=state.mode==='month'?new Date(state.cursor.getFullYear(),state.cursor.getMonth()+(action==='next'?1:-1),1,12):addDays(state.cursor,action==='next'?7:-7);return render();}
-  if(action==='today'){state.cursor=new Date();return render();}
-  if(action==='calendar-week'||action==='calendar-month'){state.mode=action==='calendar-week'?'week':'month';return render();}
+  if(action==='prev'||action==='next'){state.cursor=state.mode==='month'?new Date(state.cursor.getFullYear(),state.cursor.getMonth()+(action==='next'?1:-1),1,12):addDays(state.cursor,action==='next'?7:-7);await loadEstimate();return render();}
+  if(action==='today'){state.cursor=new Date();await loadEstimate();return render();}
+  if(action==='calendar-week'||action==='calendar-month'){state.mode=action==='calendar-week'?'week':'month';await loadEstimate();return render();}
   if(action==='delete-shift'||action==='delete-entry'){
     if(!confirm(`Archive this ${action==='delete-shift'?'shift':'time entry'}? Changes will be preserved in the audit history.`))return;
     await api(action==='delete-shift'?'/api/shifts/delete':'/api/entries/delete',{id});closeModal();await refresh();toast('Record archived');return;
@@ -282,6 +318,8 @@ async function submitModal(form) {
     endpoint='/api/employees';body={id:v('id')||undefined,name:v('name'),role:v('role'),rate:v('rate'),store_ids:values.getAll('store_ids').map(Number),active:form.elements.active?values.has('active'):true};ok='Employee saved';
   } else if(kind==='store-form'){
     endpoint='/api/stores';body={id:v('id')||undefined,name:v('name'),location:v('location'),color:v('color')||'#3c8d82',active:form.elements.active?values.has('active'):true};ok='Store saved';
+  } else if(kind==='staffing-form'){
+    endpoint='/api/store-staffing';body={store_id:Number(v('store_id')),open_time:v('open_time'),close_time:v('close_time'),slot_minutes:Math.round(Number(v('slot_hours'))*60),break_minutes:Number(v('break_minutes')),staffing:Array.from({length:7},(_,i)=>Number(v(`day_${i}`)))};ok='Weekly staffing plan saved';
   } else if(kind==='rate-form'){
     endpoint='/api/store-rate';body={employee_id:Number(v('employee_id')),store_id:Number(v('store_id')),rate:v('rate')};ok='Hourly rate updated';
   } else if(kind==='entry-form'){
@@ -311,12 +349,12 @@ document.addEventListener('submit',async event=>{
       state.session=await api('/api/login',{username:$('#login-user').value.trim(),password:$('#login-pass').value});
       await loadData();showApp();
     } else await submitModal(form);
-  }catch(e){if(form.id==='login-form')$('#login-error').textContent=e.message;else toast(e.message,true);}
+  }catch(e){if(form.id==='login-form')$('#login-error').textContent=e.message;else {const error=$('#modal-error');if(error){error.textContent=`Could not save: ${e.message}`;error.classList.remove('hidden');error.scrollIntoView({block:'nearest'});}toast(e.message,true);}}
   finally {if(submit)submit.disabled=false;}
 });
-document.addEventListener('change',event=>{
+document.addEventListener('change',async event=>{
   const t=event.target;
-  if(t.id==='global-store'){state.store=t.value;render();return;}
+  if(t.id==='global-store'){state.store=t.value;try{await loadEstimate();render();}catch(e){toast(e.message,true);}return;}
   if(t.name==='store_id'&&t.closest('#shift-form,#bulk-form,#entry-form')){
     const employee=t.closest('form').elements.employee_id;
     if(employee)employee.innerHTML=employeeChoices(Number(t.value),Number(employee.value));

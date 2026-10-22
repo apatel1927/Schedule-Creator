@@ -3,7 +3,7 @@ services:
   app:
     build:
       context: .
-    image: shiftledger:1.0.0
+    image: shiftledger:1.1.0
     container_name: shiftledger
     ports:
       - "${HOST_PORT:-8787}:8080"

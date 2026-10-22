@@ -725,6 +725,15 @@ def calculate_payroll(start, end, store_filter=None):
             "disclaimer": "Gross-pay estimate only; no taxes, benefits, tips, bonuses, state-specific overtime or deductions. Review before payroll."}
 
 
+ASSET_VERSIONS = {}
+
+
+def asset_version(name):
+    if name not in ASSET_VERSIONS:
+        ASSET_VERSIONS[name] = hashlib.sha256((APP_DIR / "static" / name).read_bytes()).hexdigest()[:12].encode()
+    return ASSET_VERSIONS[name]
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "StaffWeek-ShiftLedger/1.3"
 
@@ -1193,6 +1202,11 @@ class Handler(BaseHTTPRequestHandler):
         if not filename:
             return self.send_bytes(404, b"Not found", "text/plain; charset=utf-8")
         content = (APP_DIR / "static" / filename).read_bytes()
+        if filename == "index.html":
+            # Cache-bust: give app.js/app.css a content-hash URL so CDNs/tunnels
+            # (e.g. Cloudflare) can never serve stale code after an update.
+            content = content.replace(b'"/app.css"', b'"/app.css?v=' + asset_version("app.css") + b'"')
+            content = content.replace(b'"/app.js"', b'"/app.js?v=' + asset_version("app.js") + b'"')
         ctype = "text/html; charset=utf-8" if filename.endswith("html") else ("text/css; charset=utf-8" if filename.endswith("css") else "text/javascript; charset=utf-8")
         return self.send_bytes(200, content, ctype)
 

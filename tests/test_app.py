@@ -72,6 +72,15 @@ class ShiftLedgerTests(unittest.TestCase):
         self.request(self.owner, '/api/stores', {'name':'NoCSRF'}, expect=403)
         self.assertTrue(self.request(self.owner, '/api/session')['authenticated'])
 
+    def test_static_assets_are_cache_busted(self):
+        html = urllib.request.urlopen(self.base + '/', timeout=5).read().decode()
+        self.assertRegex(html, r'"/app\.js\?v=[0-9a-f]{12}"')
+        self.assertRegex(html, r'"/app\.css\?v=[0-9a-f]{12}"')
+        js_url = html.split('src="')[1].split('"')[0]
+        with urllib.request.urlopen(self.base + js_url, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn(b"form.getAttribute('id')", resp.read())
+
     def test_repeating_schedule_and_actual_hours(self):
         store = 1
         emp = self.create_employee([store])

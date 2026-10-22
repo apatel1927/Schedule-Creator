@@ -38,7 +38,7 @@ def utc_now():
 
 
 def db():
-    con = sqlite3.connect(DB_FILE, timeout=15, isolation_level=None)
+    con = sqlite3.connect(DB_FILE, timeout=15, isolation_level="IMMEDIATE")
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys=ON")
     con.execute("PRAGMA busy_timeout=15000")
@@ -413,7 +413,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "same-origin")
         self.send_header("Cache-Control", "no-store" if self.path.startswith("/api/") else "public, max-age=3600")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'")
         if cookie:
             self.send_header("Set-Cookie", cookie)
         if headers:
